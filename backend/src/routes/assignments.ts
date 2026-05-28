@@ -1,11 +1,25 @@
 import { Router, Request, Response } from 'express';
 import { Assignment } from '../models/Assignment';
-import { getQueue } from '../lib/redis';
-import { emitToAssignment, broadcast } from '../lib/socket';
 import { generateQuestionPaper, generateMockPaper } from '../lib/gemini';
 
-
 const router = Router();
+
+// Helper: get Socket.IO emit function only when available (non-Vercel)
+async function tryEmit(assignmentId: string, event: string, data: unknown) {
+  if (process.env.VERCEL) return;
+  try {
+    const { emitToAssignment } = await import('../lib/socket');
+    emitToAssignment(assignmentId, event, data);
+  } catch { /* Socket not available */ }
+}
+
+async function tryBroadcast(event: string, data: unknown) {
+  if (process.env.VERCEL) return;
+  try {
+    const { broadcast } = await import('../lib/socket');
+    broadcast(event, data);
+  } catch { /* Socket not available */ }
+}
 
 // GET /api/assignments - list all assignments
 router.get('/', async (_req: Request, res: Response) => {
@@ -15,6 +29,7 @@ router.get('/', async (_req: Request, res: Response) => {
       .sort({ createdAt: -1 });
     res.json({ success: true, data: assignments });
   } catch (err) {
+    console.error('List assignments error:', err);
     res.status(500).json({ success: false, error: 'Failed to fetch assignments' });
   }
 });
@@ -28,6 +43,7 @@ router.get('/:id', async (req: Request, res: Response) => {
     }
     res.json({ success: true, data: assignment });
   } catch (err) {
+    console.error('Get assignment error:', err);
     res.status(500).json({ success: false, error: 'Failed to fetch assignment' });
   }
 });
@@ -36,16 +52,8 @@ router.get('/:id', async (req: Request, res: Response) => {
 router.post('/', async (req: Request, res: Response) => {
   try {
     const {
-      title,
-      subject,
-      className,
-      dueDate,
-      totalMarks,
-      duration,
-      questionTypes,
-      additionalInstructions,
-      uploadedFileName,
-      contentText,
+      title, subject, className, dueDate, totalMarks, duration,
+      questionTypes, additionalInstructions, uploadedFileName, contentText,
     } = req.body;
 
     // Validation
@@ -55,7 +63,6 @@ router.post('/', async (req: Request, res: Response) => {
         error: 'Missing required fields: title, subject, className, dueDate, questionTypes',
       });
     }
-
     if (questionTypes.some((qt: { count: number; marks: number }) => qt.count <= 0 || qt.marks <= 0)) {
       return res.status(400).json({
         success: false,
@@ -64,14 +71,11 @@ router.post('/', async (req: Request, res: Response) => {
     }
 
     const calculatedTotal = questionTypes.reduce(
-      (sum: number, qt: { count: number; marks: number }) => sum + qt.count * qt.marks,
-      0
+      (sum: number, qt: { count: number; marks: number }) => sum + qt.count * qt.marks, 0
     );
 
     const assignment = new Assignment({
-      title,
-      subject,
-      className,
+      title, subject, className,
       dueDate: new Date(dueDate),
       totalMarks: totalMarks || calculatedTotal,
       duration: duration || 45,
@@ -80,56 +84,84 @@ router.post('/', async (req: Request, res: Response) => {
       uploadedFileName,
       jobStatus: 'pending',
     });
-
     await assignment.save();
 
     const assignmentId = (assignment._id as { toString(): string }).toString();
+    await tryBroadcast('assignment:created', {
+      _id: assignmentId, title, subject, className, dueDate,
+      jobStatus: 'pending', createdAt: assignment.createdAt,
+    });
 
-    // Try to enqueue BullMQ job
-    let jobQueued = false;
-    try {
-      const queue = getQueue();
-      if (queue) {
-        const job = await queue.add('generate-questions', {
-          assignmentId,
-          contentText,
-        });
-        assignment.jobId = job.id?.toString();
-        assignment.jobStatus = 'pending';
+    const isVercel = !!process.env.VERCEL;
+
+    if (isVercel) {
+      // ── VERCEL: generate synchronously before responding ──────────────────
+      // (Vercel serverless functions can't do background work after res.send)
+      try {
+        assignment.jobStatus = 'processing';
         await assignment.save();
-        jobQueued = true;
-        console.log(`📥 Job queued: ${job.id} for assignment ${assignmentId}`);
+
+        const input = {
+          subject, className,
+          totalMarks: totalMarks || calculatedTotal,
+          duration: duration || 45,
+          questionTypes, additionalInstructions, contentText,
+        };
+
+        let paper;
+        const apiKey = process.env.GEMINI_API_KEY;
+        if (!apiKey || apiKey === 'your_gemini_api_key_here') {
+          paper = generateMockPaper(input);
+        } else {
+          paper = await generateQuestionPaper(input);
+        }
+
+        assignment.generatedPaper = paper;
+        assignment.jobStatus = 'completed';
+        await assignment.save();
+
+        return res.status(201).json({
+          success: true,
+          data: { _id: assignmentId, title, jobStatus: 'completed', createdAt: assignment.createdAt },
+        });
+      } catch (genErr: unknown) {
+        const errorMessage = genErr instanceof Error ? genErr.message : 'Generation failed';
+        assignment.jobStatus = 'failed';
+        assignment.jobError = errorMessage;
+        await assignment.save();
+        return res.status(201).json({
+          success: true,
+          data: { _id: assignmentId, title, jobStatus: 'failed', createdAt: assignment.createdAt },
+        });
       }
-    } catch (queueErr) {
-      console.warn('BullMQ not available, processing inline:', queueErr);
+    } else {
+      // ── LOCAL: fire-and-forget async processing ────────────────────────────
+      res.status(201).json({
+        success: true,
+        data: { _id: assignmentId, title, jobStatus: 'pending', createdAt: assignment.createdAt },
+      });
+
+      // Try BullMQ first
+      let jobQueued = false;
+      try {
+        const { getQueue } = await import('../lib/redis');
+        const queue = getQueue();
+        if (queue) {
+          await queue.add('generate-questions', { assignmentId, contentText });
+          assignment.jobStatus = 'pending';
+          await assignment.save();
+          jobQueued = true;
+        }
+      } catch { /* no queue */ }
+
+      if (!jobQueued) {
+        processInline(
+          assignmentId, subject, className,
+          totalMarks || calculatedTotal, duration || 45,
+          questionTypes, additionalInstructions, contentText
+        ).catch(console.error);
+      }
     }
-
-    // If no queue available, process inline (fallback)
-    if (!jobQueued) {
-      processInline(assignmentId, subject, className, totalMarks || calculatedTotal, duration || 45, questionTypes, additionalInstructions, contentText)
-        .catch(console.error);
-    }
-
-    // Broadcast new assignment to all clients
-    broadcast('assignment:created', {
-      _id: assignmentId,
-      title: assignment.title,
-      subject: assignment.subject,
-      className: assignment.className,
-      dueDate: assignment.dueDate,
-      jobStatus: assignment.jobStatus,
-      createdAt: assignment.createdAt,
-    });
-
-    res.status(201).json({
-      success: true,
-      data: {
-        _id: assignmentId,
-        title: assignment.title,
-        jobStatus: assignment.jobStatus,
-        createdAt: assignment.createdAt,
-      },
-    });
   } catch (err) {
     console.error('Create assignment error:', err);
     res.status(500).json({ success: false, error: 'Failed to create assignment' });
@@ -143,14 +175,14 @@ router.delete('/:id', async (req: Request, res: Response) => {
     if (!assignment) {
       return res.status(404).json({ success: false, error: 'Assignment not found' });
     }
-    broadcast('assignment:deleted', { _id: req.params.id });
+    await tryBroadcast('assignment:deleted', { _id: req.params.id });
     res.json({ success: true, message: 'Assignment deleted' });
   } catch (err) {
     res.status(500).json({ success: false, error: 'Failed to delete assignment' });
   }
 });
 
-// PATCH /api/assignments/:id/regenerate - trigger regeneration
+// PATCH /api/assignments/:id/regenerate
 router.patch('/:id/regenerate', async (req: Request, res: Response) => {
   try {
     const assignment = await Assignment.findById(req.params.id);
@@ -158,103 +190,79 @@ router.patch('/:id/regenerate', async (req: Request, res: Response) => {
       return res.status(404).json({ success: false, error: 'Assignment not found' });
     }
 
-    assignment.jobStatus = 'pending';
+    assignment.jobStatus = 'processing';
     assignment.generatedPaper = undefined;
     assignment.jobError = undefined;
     await assignment.save();
 
     const assignmentId = (assignment._id as { toString(): string }).toString();
+    const isVercel = !!process.env.VERCEL;
 
-    // Try queue first, then inline
-    let jobQueued = false;
-    try {
-      const queue = getQueue();
-      if (queue) {
-        await queue.add('generate-questions', { assignmentId });
-        jobQueued = true;
+    const input = {
+      subject: assignment.subject,
+      className: assignment.className,
+      totalMarks: assignment.totalMarks,
+      duration: assignment.duration,
+      questionTypes: assignment.questionTypes,
+      additionalInstructions: assignment.additionalInstructions,
+    };
+
+    if (isVercel) {
+      // Synchronous on Vercel
+      try {
+        const apiKey = process.env.GEMINI_API_KEY;
+        const paper = (!apiKey || apiKey === 'your_gemini_api_key_here')
+          ? generateMockPaper(input)
+          : await generateQuestionPaper(input);
+
+        assignment.generatedPaper = paper;
+        assignment.jobStatus = 'completed';
+        await assignment.save();
+        return res.json({ success: true, message: 'Regeneration complete', paper });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'Failed';
+        assignment.jobStatus = 'failed';
+        assignment.jobError = msg;
+        await assignment.save();
+        return res.json({ success: false, error: msg });
       }
-    } catch {
-      // no queue
+    } else {
+      await tryEmit(assignmentId, 'job:progress', { assignmentId, status: 'processing', message: 'Regenerating...' });
+      processInline(assignmentId, assignment.subject, assignment.className, assignment.totalMarks, assignment.duration, assignment.questionTypes, assignment.additionalInstructions).catch(console.error);
+      return res.json({ success: true, message: 'Regeneration started' });
     }
-
-    if (!jobQueued) {
-      processInline(
-        assignmentId,
-        assignment.subject,
-        assignment.className,
-        assignment.totalMarks,
-        assignment.duration,
-        assignment.questionTypes,
-        assignment.additionalInstructions
-      ).catch(console.error);
-    }
-
-    emitToAssignment(assignmentId, 'job:progress', {
-      assignmentId,
-      status: 'pending',
-      message: 'Regeneration queued...',
-    });
-
-    res.json({ success: true, message: 'Regeneration started' });
   } catch (err) {
     res.status(500).json({ success: false, error: 'Failed to start regeneration' });
   }
 });
 
-// Inline processing fallback (when Redis/BullMQ not available)
+// Inline background processing (local only)
 async function processInline(
-  assignmentId: string,
-  subject: string,
-  className: string,
-  totalMarks: number,
-  duration: number,
+  assignmentId: string, subject: string, className: string,
+  totalMarks: number, duration: number,
   questionTypes: { type: string; count: number; marks: number }[],
-  additionalInstructions?: string,
-  contentText?: string
+  additionalInstructions?: string, contentText?: string
 ) {
   try {
     await Assignment.findByIdAndUpdate(assignmentId, { jobStatus: 'processing' });
-
-    emitToAssignment(assignmentId, 'job:progress', {
-      assignmentId,
-      status: 'processing',
-      message: 'AI is generating your question paper...',
-    });
+    await tryEmit(assignmentId, 'job:progress', { assignmentId, status: 'processing', message: 'AI is generating your question paper...' });
 
     const input = { subject, className, totalMarks, duration, questionTypes, additionalInstructions, contentText };
-    
-    let paper;
     const apiKey = process.env.GEMINI_API_KEY;
+    let paper;
     if (!apiKey || apiKey === 'your_gemini_api_key_here') {
-      // Simulate delay for realistic experience
       await new Promise(r => setTimeout(r, 2000));
       paper = generateMockPaper(input);
     } else {
       paper = await generateQuestionPaper(input);
     }
 
-    await Assignment.findByIdAndUpdate(assignmentId, {
-      jobStatus: 'completed',
-      generatedPaper: paper,
-    });
-
-    emitToAssignment(assignmentId, 'job:complete', {
-      assignmentId,
-      status: 'completed',
-      paper,
-    });
+    await Assignment.findByIdAndUpdate(assignmentId, { jobStatus: 'completed', generatedPaper: paper });
+    await tryEmit(assignmentId, 'job:complete', { assignmentId, status: 'completed', paper });
   } catch (err: unknown) {
-    const errorMessage = err instanceof Error ? err.message : 'Unknown error';
-    await Assignment.findByIdAndUpdate(assignmentId, {
-      jobStatus: 'failed',
-      jobError: errorMessage,
-    });
-
-    emitToAssignment(assignmentId, 'job:failed', {
-      assignmentId,
-      status: 'failed',
-      error: errorMessage,
-    });
+    const msg = err instanceof Error ? err.message : 'Unknown error';
+    await Assignment.findByIdAndUpdate(assignmentId, { jobStatus: 'failed', jobError: msg });
+    await tryEmit(assignmentId, 'job:failed', { assignmentId, status: 'failed', error: msg });
   }
 }
 

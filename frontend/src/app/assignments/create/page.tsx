@@ -2,6 +2,7 @@
 
 import { useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
+import axios from 'axios';
 import Sidebar from '@/components/Sidebar';
 import Header from '@/components/Header';
 import { useAssignmentStore, QuestionType } from '@/store/assignmentStore';
@@ -50,6 +51,7 @@ export default function CreateAssignmentPage() {
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [uploadedFileName, setUploadedFileName] = useState('');
   const [isDragging, setIsDragging] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
   const [errors, setErrors] = useState<FormErrors>({});
   const [uploadError, setUploadError] = useState('');
 
@@ -141,7 +143,26 @@ export default function CreateAssignmentPage() {
     clearError();
     if (!validate()) return;
 
+    setIsUploading(true);
     try {
+      let contentText: string | undefined = undefined;
+
+      if (uploadedFile) {
+        const formData = new FormData();
+        formData.append('file', uploadedFile);
+        
+        const uploadUrl = `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000'}/api/upload`;
+        const uploadRes = await axios.post(uploadUrl, formData, {
+          headers: {
+            'Content-Type': 'multipart/form-data',
+          },
+        });
+        
+        if (uploadRes.data.success) {
+          contentText = uploadRes.data.data.extractedText;
+        }
+      }
+
       const assignmentId = await createAssignment({
         title,
         subject,
@@ -152,6 +173,7 @@ export default function CreateAssignmentPage() {
         questionTypes,
         additionalInstructions: additionalInstructions || undefined,
         uploadedFileName: uploadedFileName || undefined,
+        contentText,
       });
 
       // Join the WebSocket room to get real-time updates
@@ -161,6 +183,8 @@ export default function CreateAssignmentPage() {
       router.push(`/assignments/${assignmentId}/output`);
     } catch {
       // Error handled in store
+    } finally {
+      setIsUploading(false);
     }
   };
 
@@ -433,10 +457,15 @@ export default function CreateAssignmentPage() {
               <button
                 type="submit"
                 className="btn btn-primary"
-                disabled={isCreating}
+                disabled={isCreating || isUploading}
                 id="submit-assignment-btn"
               >
-                {isCreating ? (
+                {isUploading ? (
+                  <>
+                    <span className="spinner" style={{ width: '14px', height: '14px', borderWidth: '2px' }} />
+                    Uploading file...
+                  </>
+                ) : isCreating ? (
                   <>
                     <span className="spinner" style={{ width: '14px', height: '14px', borderWidth: '2px' }} />
                     Generating...
