@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Assignment, useAssignmentStore } from '@/store/assignmentStore';
 
@@ -15,11 +15,16 @@ function formatDate(dateStr: string): string {
 
 function getStatusLabel(status: string) {
   switch (status) {
-    case 'pending': return { label: '● Queued', cls: 'pending' };
-    case 'processing': return { label: '⟳ Generating...', cls: 'processing' };
-    case 'completed': return { label: '✓ Ready', cls: 'completed' };
-    case 'failed': return { label: '✕ Failed', cls: 'failed' };
-    default: return { label: status, cls: 'pending' };
+    case 'pending':
+      return { label: 'Queued', cls: 'pending' };
+    case 'processing':
+      return { label: 'Generating...', cls: 'processing' };
+    case 'completed':
+      return { label: 'Ready', cls: 'completed' };
+    case 'failed':
+      return { label: 'Failed', cls: 'failed' };
+    default:
+      return { label: status, cls: 'pending' };
   }
 }
 
@@ -41,30 +46,23 @@ export default function AssignmentCard({ assignment }: AssignmentCardProps) {
 
   const statusInfo = getStatusLabel(assignment.jobStatus);
 
-  const handleView = () => {
+  function handleView() {
     router.push(`/assignments/${assignment._id}/output`);
     setMenuOpen(false);
-  };
+  }
 
-  const handleDelete = async (e: React.MouseEvent) => {
+  async function handleDelete(e: React.MouseEvent) {
     e.stopPropagation();
     if (confirm('Delete this assignment? This cannot be undone.')) {
       await deleteAssignment(assignment._id);
     }
     setMenuOpen(false);
-  };
-
-  const handleCardClick = () => {
-    router.push(`/assignments/${assignment._id}/output`);
-  };
-
-  const assignedDate = formatDate(assignment.createdAt);
-  const dueDate = formatDate(assignment.dueDate);
+  }
 
   return (
     <article
       className="assignment-card"
-      onClick={handleCardClick}
+      onClick={() => router.push(`/assignments/${assignment._id}/output`)}
       role="button"
       aria-label={`Assignment: ${assignment.title}`}
       id={`assignment-card-${assignment._id}`}
@@ -72,21 +70,18 @@ export default function AssignmentCard({ assignment }: AssignmentCardProps) {
       <div className="assignment-card-header">
         <div>
           <h3 className="assignment-card-title">{assignment.title}</h3>
-          {(assignment.jobStatus === 'pending' || assignment.jobStatus === 'processing') && (
-            <span className={`status-badge ${statusInfo.cls}`} style={{ marginTop: '6px', display: 'inline-flex' }}>
-              {assignment.jobStatus === 'processing' && (
-                <span className="spinner" style={{ width: '10px', height: '10px', marginRight: '4px' }} />
-              )}
-              {statusInfo.label}
-            </span>
-          )}
+          <p className="assignment-card-subtitle">
+            {assignment.subject} / {assignment.className}
+          </p>
+          <span className={`status-badge ${statusInfo.cls}`} style={{ marginTop: '8px', display: 'inline-flex' }}>
+            {assignment.jobStatus === 'processing' && (
+              <span className="spinner" style={{ width: 10, height: 10, marginRight: 4, borderWidth: 1.5 }} />
+            )}
+            {statusInfo.label}
+          </span>
         </div>
 
-        <div
-          className="assignment-card-menu"
-          ref={menuRef}
-          onClick={(e) => e.stopPropagation()}
-        >
+        <div className="assignment-card-menu" ref={menuRef} onClick={(e) => e.stopPropagation()}>
           <button
             className="menu-trigger"
             onClick={() => setMenuOpen(!menuOpen)}
@@ -122,10 +117,10 @@ export default function AssignmentCard({ assignment }: AssignmentCardProps) {
 
       <div className="assignment-card-footer">
         <div className="assignment-date">
-          Assigned on: <span>{assignedDate}</span>
+          Assigned: <span>{formatDate(assignment.createdAt)}</span>
         </div>
         <div className="assignment-date">
-          Due: <span>{dueDate}</span>
+          Due: <span>{formatDate(assignment.dueDate)}</span>
         </div>
       </div>
     </article>

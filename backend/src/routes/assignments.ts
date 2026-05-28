@@ -1,16 +1,17 @@
 import { Router, Request, Response } from 'express';
 import { Assignment } from '../models/Assignment';
-import { generateQuestionPaper, generateMockPaper } from '../lib/gemini';
+import { GenerationInput, generateQuestionPaper } from '../lib/gemini';
 
 const router = Router();
 
-// Helper: get Socket.IO emit function only when available (non-Vercel)
 async function tryEmit(assignmentId: string, event: string, data: unknown) {
   if (process.env.VERCEL) return;
   try {
     const { emitToAssignment } = await import('../lib/socket');
     emitToAssignment(assignmentId, event, data);
-  } catch { /* Socket not available */ }
+  } catch {
+    // Socket.IO is optional outside the local dev server.
+  }
 }
 
 async function tryBroadcast(event: string, data: unknown) {
@@ -18,15 +19,64 @@ async function tryBroadcast(event: string, data: unknown) {
   try {
     const { broadcast } = await import('../lib/socket');
     broadcast(event, data);
-  } catch { /* Socket not available */ }
+  } catch {
+    // Socket.IO is optional outside the local dev server.
+  }
 }
 
-// GET /api/assignments - list all assignments
+function validateQuestionTypes(questionTypes: unknown): questionTypes is GenerationInput['questionTypes'] {
+  return (
+    Array.isArray(questionTypes) &&
+    questionTypes.length > 0 &&
+    questionTypes.every(
+      (qt) =>
+        qt &&
+        typeof qt.type === 'string' &&
+        qt.type.trim().length > 0 &&
+        Number(qt.count) > 0 &&
+        Number(qt.marks) > 0
+    )
+  );
+}
+
+function normalizeQuestionTypes(questionTypes: GenerationInput['questionTypes']) {
+  return questionTypes.map((qt) => ({
+    type: qt.type.trim(),
+    count: Number(qt.count),
+    marks: Number(qt.marks),
+  }));
+}
+
+function buildGenerationInput(body: {
+  subject: string;
+  className: string;
+  totalMarks?: number;
+  duration?: number;
+  questionTypes: GenerationInput['questionTypes'];
+  additionalInstructions?: string;
+  contentText?: string;
+}): GenerationInput {
+  const questionTypes = normalizeQuestionTypes(body.questionTypes);
+  const totalMarks =
+    Number(body.totalMarks) || questionTypes.reduce((sum, qt) => sum + qt.count * qt.marks, 0);
+
+  return {
+    subject: body.subject.trim(),
+    className: body.className.trim(),
+    totalMarks,
+    duration: Number(body.duration) || 45,
+    questionTypes,
+    additionalInstructions: body.additionalInstructions?.trim() || undefined,
+    contentText: body.contentText?.slice(0, 3000) || undefined,
+  };
+}
+
 router.get('/', async (_req: Request, res: Response) => {
   try {
     const assignments = await Assignment.find()
       .select('-generatedPaper')
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
     res.json({ success: true, data: assignments });
   } catch (err) {
     console.error('List assignments error:', err);
@@ -34,7 +84,6 @@ router.get('/', async (_req: Request, res: Response) => {
   }
 });
 
-// GET /api/assignments/:id - get single assignment with paper
 router.get('/:id', async (req: Request, res: Response) => {
   try {
     const assignment = await Assignment.findById(req.params.id);
@@ -48,124 +97,91 @@ router.get('/:id', async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/assignments - create new assignment
 router.post('/', async (req: Request, res: Response) => {
   try {
     const {
-      title, subject, className, dueDate, totalMarks, duration,
-      questionTypes, additionalInstructions, uploadedFileName, contentText,
-    } = req.body;
-
-    // Validation
-    if (!title || !subject || !className || !dueDate || !questionTypes?.length) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required fields: title, subject, className, dueDate, questionTypes',
-      });
-    }
-    if (questionTypes.some((qt: { count: number; marks: number }) => qt.count <= 0 || qt.marks <= 0)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Question count and marks must be positive numbers',
-      });
-    }
-
-    const calculatedTotal = questionTypes.reduce(
-      (sum: number, qt: { count: number; marks: number }) => sum + qt.count * qt.marks, 0
-    );
-
-    const assignment = new Assignment({
-      title, subject, className,
-      dueDate: new Date(dueDate),
-      totalMarks: totalMarks || calculatedTotal,
-      duration: duration || 45,
+      title,
+      subject,
+      className,
+      dueDate,
       questionTypes,
       additionalInstructions,
       uploadedFileName,
-      jobStatus: 'pending',
-    });
-    await assignment.save();
+      contentText,
+    } = req.body;
 
-    const assignmentId = (assignment._id as { toString(): string }).toString();
-    await tryBroadcast('assignment:created', {
-      _id: assignmentId, title, subject, className, dueDate,
-      jobStatus: 'pending', createdAt: assignment.createdAt,
-    });
-
-    const isVercel = !!process.env.VERCEL;
-
-    if (isVercel) {
-      // ── VERCEL: generate synchronously before responding ──────────────────
-      // (Vercel serverless functions can't do background work after res.send)
-      try {
-        assignment.jobStatus = 'processing';
-        await assignment.save();
-
-        const input = {
-          subject, className,
-          totalMarks: totalMarks || calculatedTotal,
-          duration: duration || 45,
-          questionTypes, additionalInstructions, contentText,
-        };
-
-        let paper;
-        const apiKey = process.env.GEMINI_API_KEY;
-        if (!apiKey || apiKey === 'your_gemini_api_key_here') {
-          paper = generateMockPaper(input);
-        } else {
-          try {
-            paper = await generateQuestionPaper(input);
-          } catch (apiErr) {
-            console.warn('Gemini API call failed, falling back to mock generator:', apiErr);
-            paper = generateMockPaper(input);
-          }
-        }
-
-        assignment.generatedPaper = paper;
-        assignment.jobStatus = 'completed';
-        await assignment.save();
-
-        return res.status(201).json({
-          success: true,
-          data: { _id: assignmentId, title, jobStatus: 'completed', createdAt: assignment.createdAt },
-        });
-      } catch (genErr: unknown) {
-        const errorMessage = genErr instanceof Error ? genErr.message : 'Generation failed';
-        assignment.jobStatus = 'failed';
-        assignment.jobError = errorMessage;
-        await assignment.save();
-        return res.status(201).json({
-          success: true,
-          data: { _id: assignmentId, title, jobStatus: 'failed', createdAt: assignment.createdAt },
-        });
-      }
-    } else {
-      // ── LOCAL: fire-and-forget async processing ────────────────────────────
-      res.status(201).json({
-        success: true,
-        data: { _id: assignmentId, title, jobStatus: 'pending', createdAt: assignment.createdAt },
+    if (!title?.trim() || !subject?.trim() || !className?.trim() || !dueDate) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: title, subject, className, dueDate',
       });
+    }
 
-      // Try BullMQ first
-      let jobQueued = false;
-      try {
-        const { getQueue } = await import('../lib/redis');
-        const queue = getQueue();
-        if (queue) {
-          await queue.add('generate-questions', { assignmentId, contentText });
-          assignment.jobStatus = 'pending';
-          await assignment.save();
-          jobQueued = true;
-        }
-      } catch { /* no queue */ }
+    if (!validateQuestionTypes(questionTypes)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Add at least one valid question type with positive count and marks',
+      });
+    }
 
-      if (!jobQueued) {
-        processInline(
-          assignmentId, subject, className,
-          totalMarks || calculatedTotal, duration || 45,
-          questionTypes, additionalInstructions, contentText
-        ).catch(console.error);
+    const input = buildGenerationInput({
+      subject,
+      className,
+      totalMarks: req.body.totalMarks,
+      duration: req.body.duration,
+      questionTypes,
+      additionalInstructions,
+      contentText,
+    });
+
+    const assignment = await Assignment.create({
+      title: title.trim(),
+      subject: input.subject,
+      className: input.className,
+      dueDate: new Date(dueDate),
+      totalMarks: input.totalMarks,
+      duration: input.duration,
+      questionTypes: input.questionTypes,
+      additionalInstructions: input.additionalInstructions,
+      uploadedFileName,
+      jobStatus: process.env.VERCEL ? 'processing' : 'pending',
+    });
+
+    const assignmentId = assignment._id.toString();
+    await tryBroadcast('assignment:created', assignment.toObject());
+
+    if (process.env.VERCEL) {
+      const paper = await generateQuestionPaper(input);
+      assignment.generatedPaper = paper;
+      assignment.jobStatus = 'completed';
+      assignment.jobError = undefined;
+      await assignment.save();
+
+      return res.status(201).json({
+        success: true,
+        data: assignment,
+      });
+    }
+
+    res.status(201).json({
+      success: true,
+      data: assignment,
+    });
+
+    let jobQueued = false;
+    try {
+      const { getQueue } = await import('../lib/redis');
+      const queue = getQueue();
+      if (queue) {
+        await queue.add('generate-questions', { assignmentId, contentText: input.contentText });
+        jobQueued = true;
       }
+    } catch {
+      // Fall back to inline processing below.
+    }
+
+    if (!jobQueued) {
+      processInline(assignmentId, input).catch(console.error);
     }
   } catch (err) {
     console.error('Create assignment error:', err);
@@ -173,7 +189,6 @@ router.post('/', async (req: Request, res: Response) => {
   }
 });
 
-// DELETE /api/assignments/:id
 router.delete('/:id', async (req: Request, res: Response) => {
   try {
     const assignment = await Assignment.findByIdAndDelete(req.params.id);
@@ -183,11 +198,11 @@ router.delete('/:id', async (req: Request, res: Response) => {
     await tryBroadcast('assignment:deleted', { _id: req.params.id });
     res.json({ success: true, message: 'Assignment deleted' });
   } catch (err) {
+    console.error('Delete assignment error:', err);
     res.status(500).json({ success: false, error: 'Failed to delete assignment' });
   }
 });
 
-// PATCH /api/assignments/:id/regenerate
 router.patch('/:id/regenerate', async (req: Request, res: Response) => {
   try {
     const assignment = await Assignment.findById(req.params.id);
@@ -200,83 +215,58 @@ router.patch('/:id/regenerate', async (req: Request, res: Response) => {
     assignment.jobError = undefined;
     await assignment.save();
 
-    const assignmentId = (assignment._id as { toString(): string }).toString();
-    const isVercel = !!process.env.VERCEL;
-
-    const input = {
+    const input: GenerationInput = {
       subject: assignment.subject,
       className: assignment.className,
       totalMarks: assignment.totalMarks,
       duration: assignment.duration,
-      questionTypes: assignment.questionTypes,
+      questionTypes: normalizeQuestionTypes(assignment.questionTypes),
       additionalInstructions: assignment.additionalInstructions,
     };
 
-    if (isVercel) {
-      // Synchronous on Vercel
-      try {
-        const apiKey = process.env.GEMINI_API_KEY;
-        let paper;
-        if (!apiKey || apiKey === 'your_gemini_api_key_here') {
-          paper = generateMockPaper(input);
-        } else {
-          try {
-            paper = await generateQuestionPaper(input);
-          } catch (apiErr) {
-            console.warn('Gemini API call failed, falling back to mock generator:', apiErr);
-            paper = generateMockPaper(input);
-          }
-        }
+    const assignmentId = assignment._id.toString();
 
-        assignment.generatedPaper = paper;
-        assignment.jobStatus = 'completed';
-        await assignment.save();
-        return res.json({ success: true, message: 'Regeneration complete', paper });
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : 'Failed';
-        assignment.jobStatus = 'failed';
-        assignment.jobError = msg;
-        await assignment.save();
-        return res.json({ success: false, error: msg });
-      }
-    } else {
-      await tryEmit(assignmentId, 'job:progress', { assignmentId, status: 'processing', message: 'Regenerating...' });
-      processInline(assignmentId, assignment.subject, assignment.className, assignment.totalMarks, assignment.duration, assignment.questionTypes, assignment.additionalInstructions).catch(console.error);
-      return res.json({ success: true, message: 'Regeneration started' });
+    if (process.env.VERCEL) {
+      const paper = await generateQuestionPaper(input);
+      assignment.generatedPaper = paper;
+      assignment.jobStatus = 'completed';
+      await assignment.save();
+      return res.json({ success: true, data: assignment, paper });
     }
+
+    await tryEmit(assignmentId, 'job:progress', {
+      assignmentId,
+      status: 'processing',
+      message: 'Regenerating question paper...',
+    });
+
+    processInline(assignmentId, input).catch(console.error);
+    return res.json({ success: true, message: 'Regeneration started', data: assignment });
   } catch (err) {
-    res.status(500).json({ success: false, error: 'Failed to start regeneration' });
+    console.error('Regenerate assignment error:', err);
+    res.status(500).json({ success: false, error: 'Failed to regenerate assignment' });
   }
 });
 
-// Inline background processing (local only)
-async function processInline(
-  assignmentId: string, subject: string, className: string,
-  totalMarks: number, duration: number,
-  questionTypes: { type: string; count: number; marks: number }[],
-  additionalInstructions?: string, contentText?: string
-) {
+async function processInline(assignmentId: string, input: GenerationInput) {
   try {
-    await Assignment.findByIdAndUpdate(assignmentId, { jobStatus: 'processing' });
-    await tryEmit(assignmentId, 'job:progress', { assignmentId, status: 'processing', message: 'AI is generating your question paper...' });
+    await Assignment.findByIdAndUpdate(assignmentId, {
+      jobStatus: 'processing',
+      jobError: undefined,
+    });
+    await tryEmit(assignmentId, 'job:progress', {
+      assignmentId,
+      status: 'processing',
+      message: 'AI is generating your question paper...',
+    });
 
-    const input = { subject, className, totalMarks, duration, questionTypes, additionalInstructions, contentText };
-    const apiKey = process.env.GEMINI_API_KEY;
-    let paper;
-    if (!apiKey || apiKey === 'your_gemini_api_key_here') {
-      await new Promise(r => setTimeout(r, 2000));
-      paper = generateMockPaper(input);
-    } else {
-      try {
-        paper = await generateQuestionPaper(input);
-      } catch (apiErr) {
-        console.warn('Gemini API call failed, falling back to mock generator:', apiErr);
-        await new Promise(r => setTimeout(r, 2000));
-        paper = generateMockPaper(input);
-      }
-    }
+    const paper = await generateQuestionPaper(input);
 
-    await Assignment.findByIdAndUpdate(assignmentId, { jobStatus: 'completed', generatedPaper: paper });
+    await Assignment.findByIdAndUpdate(assignmentId, {
+      jobStatus: 'completed',
+      generatedPaper: paper,
+      jobError: undefined,
+    });
     await tryEmit(assignmentId, 'job:complete', { assignmentId, status: 'completed', paper });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error';

@@ -9,31 +9,30 @@ import uploadRoutes from './routes/upload';
 const app = express();
 const httpServer = createServer(app);
 
-// Middleware
-app.use(cors({
-  origin: (origin, callback) => {
-    callback(null, origin || '*');
-  },
-  credentials: true,
-}));
+app.use(
+  cors({
+    origin(origin, callback) {
+      callback(null, origin || true);
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    optionsSuccessStatus: 204,
+  })
+);
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// DB connection (cached for serverless)
-let dbConnected = false;
 app.use(async (_req, _res, next) => {
-  if (!dbConnected) {
-    try {
-      await connectDB();
-      dbConnected = true;
-    } catch {
-      // Continue even if DB fails on first request
-    }
+  try {
+    await connectDB();
+    next();
+  } catch {
+    next();
   }
-  next();
 });
 
-// Routes
 app.use('/api/assignments', assignmentRoutes);
 app.use('/api/upload', uploadRoutes);
 
@@ -41,23 +40,17 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// 404 handler
 app.use((_req, res) => {
-  res.status(404).json({ error: 'Route not found' });
+  res.status(404).json({ success: false, error: 'Route not found' });
 });
 
-const isVercel = !!process.env.VERCEL;
-
-if (!isVercel) {
-  // Only run persistent server + WebSocket locally
+if (!process.env.VERCEL) {
   const PORT = parseInt(process.env.PORT || '5000', 10);
 
   async function start() {
     try {
       await connectDB();
-      dbConnected = true;
 
-      // Only init Redis + Socket.IO locally
       try {
         const { initRedis } = await import('./lib/redis');
         await initRedis();
@@ -73,7 +66,7 @@ if (!isVercel) {
       }
 
       httpServer.listen(PORT, () => {
-        console.log(`🚀 VedaAI Backend running on http://localhost:${PORT}`);
+        console.log(`VedaAI Backend running on http://localhost:${PORT}`);
       });
     } catch (err) {
       console.error('Failed to start server:', err);

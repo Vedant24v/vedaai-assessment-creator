@@ -3,6 +3,10 @@ import { devtools } from 'zustand/middleware';
 import axios from 'axios';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
+const api = axios.create({
+  baseURL: API_URL,
+  withCredentials: true,
+});
 
 export interface QuestionType {
   type: string;
@@ -90,7 +94,7 @@ interface AssignmentStore {
 
 export const useAssignmentStore = create<AssignmentStore>()(
   devtools(
-    (set, get) => ({
+    (set) => ({
       assignments: [],
       currentAssignment: null,
       isLoading: false,
@@ -100,7 +104,7 @@ export const useAssignmentStore = create<AssignmentStore>()(
       fetchAssignments: async () => {
         set({ isLoading: true, error: null });
         try {
-          const res = await axios.get(`${API_URL}/api/assignments`);
+          const res = await api.get('/api/assignments');
           set({ assignments: res.data.data, isLoading: false });
         } catch (err) {
           const message = axios.isAxiosError(err) ? err.message : 'Failed to fetch assignments';
@@ -111,7 +115,7 @@ export const useAssignmentStore = create<AssignmentStore>()(
       fetchAssignment: async (id: string) => {
         set({ isLoading: true, error: null });
         try {
-          const res = await axios.get(`${API_URL}/api/assignments/${id}`);
+          const res = await api.get(`/api/assignments/${id}`);
           set({ currentAssignment: res.data.data, isLoading: false });
         } catch (err) {
           const message = axios.isAxiosError(err) ? err.message : 'Failed to fetch assignment';
@@ -122,7 +126,7 @@ export const useAssignmentStore = create<AssignmentStore>()(
       createAssignment: async (data: CreateAssignmentInput) => {
         set({ isCreating: true, error: null });
         try {
-          const res = await axios.post(`${API_URL}/api/assignments`, data);
+          const res = await api.post('/api/assignments', data);
           set({ isCreating: false });
           return res.data.data._id;
         } catch (err) {
@@ -136,7 +140,7 @@ export const useAssignmentStore = create<AssignmentStore>()(
 
       deleteAssignment: async (id: string) => {
         try {
-          await axios.delete(`${API_URL}/api/assignments/${id}`);
+          await api.delete(`/api/assignments/${id}`);
           set((state) => ({
             assignments: state.assignments.filter((a) => a._id !== id),
           }));
@@ -149,14 +153,17 @@ export const useAssignmentStore = create<AssignmentStore>()(
 
       regenerateAssignment: async (id: string) => {
         try {
-          await axios.patch(`${API_URL}/api/assignments/${id}/regenerate`);
+          const res = await api.patch(`/api/assignments/${id}/regenerate`);
+          const updated = res.data.data as Assignment | undefined;
           set((state) => ({
             assignments: state.assignments.map((a) =>
-              a._id === id ? { ...a, jobStatus: 'pending', generatedPaper: undefined } : a
+              a._id === id
+                ? updated || { ...a, jobStatus: 'processing', generatedPaper: undefined }
+                : a
             ),
             currentAssignment:
               state.currentAssignment?._id === id
-                ? { ...state.currentAssignment, jobStatus: 'pending', generatedPaper: undefined }
+                ? updated || { ...state.currentAssignment, jobStatus: 'processing', generatedPaper: undefined }
                 : state.currentAssignment,
           }));
         } catch (err) {

@@ -1,42 +1,50 @@
 import Redis from 'ioredis';
 import { Queue } from 'bullmq';
 
-let redisClient: Redis;
-let questionQueue: Queue;
-let redisConnectionString: string;
+let redisClient: Redis | undefined;
+let questionQueue: Queue | undefined;
+let redisConnectionString = process.env.REDIS_URL || 'redis://localhost:6379';
 
 export async function initRedis(): Promise<void> {
   redisConnectionString = process.env.REDIS_URL || 'redis://localhost:6379';
-  
-  redisClient = new Redis(redisConnectionString, {
-    maxRetriesPerRequest: null,
+
+  const client = new Redis(redisConnectionString, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
     enableReadyCheck: false,
-    retryStrategy: (times: number) => {
-      if (times > 3) {
-        console.warn('Redis not available, running without queue support');
-        return null; // stop retrying
-      }
-      return Math.min(times * 200, 2000);
-    },
+    retryStrategy: () => null,
   });
 
-  redisClient.on('connect', () => console.log('✅ Redis connected'));
-  redisClient.on('error', () => {
-    // Redis connection errors are expected when Redis is not running
-    // The system falls back to inline processing automatically
+  client.on('error', () => {
+    // Redis is optional locally; inline generation is used when unavailable.
   });
 
+  try {
+    await client.connect();
+    await client.ping();
+    const info = await client.info('server');
+    const version = info.match(/redis_version:(\d+)\.(\d+)\.(\d+)/)?.slice(1).map(Number);
+    if (!version || version[0] < 5) {
+      redisClient = undefined;
+      questionQueue = undefined;
+      client.disconnect();
+      console.warn(`Redis ${version?.join('.') || 'unknown'} detected, but BullMQ requires Redis 5+. Running inline generation.`);
+      return;
+    }
+  } catch {
+    redisClient = undefined;
+    questionQueue = undefined;
+    client.disconnect();
+    console.warn('Redis not available, running without queue support');
+    return;
+  }
 
-  // BullMQ uses its own bundled ioredis — pass connection config object, not instance
+  redisClient = client;
   questionQueue = new Queue('question-generation', {
     connection: {
       url: redisConnectionString,
       maxRetriesPerRequest: null,
       enableReadyCheck: false,
-      retryStrategy: (times: number) => {
-        if (times > 3) return null;
-        return Math.min(times * 200, 2000);
-      },
     },
     defaultJobOptions: {
       attempts: 3,
@@ -46,14 +54,14 @@ export async function initRedis(): Promise<void> {
     },
   });
 
-  console.log('✅ BullMQ queue initialized');
+  console.log('Redis and BullMQ queue initialized');
 }
 
-export function getRedis(): Redis {
+export function getRedis(): Redis | undefined {
   return redisClient;
 }
 
-export function getQueue(): Queue {
+export function getQueue(): Queue | undefined {
   return questionQueue;
 }
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { useAssignmentStore, GeneratedPaper } from '@/store/assignmentStore';
 
@@ -21,12 +21,10 @@ export function getSocket(): Socket {
 }
 
 export function useSocket() {
-  const socketRef = useRef<Socket | null>(null);
   const { updateAssignmentStatus, addAssignment, removeAssignment } = useAssignmentStore();
 
   useEffect(() => {
     const s = getSocket();
-    socketRef.current = s;
 
     s.on('connect', () => {
       console.log('WebSocket connected:', s.id);
@@ -74,7 +72,7 @@ export function useSocket() {
     };
   }, [updateAssignmentStatus, addAssignment, removeAssignment]);
 
-  return socketRef.current;
+  return null;
 }
 
 export function joinAssignmentRoom(assignmentId: string) {

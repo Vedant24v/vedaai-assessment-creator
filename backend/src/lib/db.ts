@@ -1,21 +1,55 @@
 import mongoose from 'mongoose';
 
+type CachedConnection = {
+  conn: typeof mongoose | null;
+  promise: Promise<typeof mongoose> | null;
+};
+
+const globalWithMongoose = globalThis as typeof globalThis & {
+  mongooseConnection?: CachedConnection;
+};
+
+const cached: CachedConnection = globalWithMongoose.mongooseConnection || {
+  conn: null,
+  promise: null,
+};
+
+if (!globalWithMongoose.mongooseConnection) {
+  globalWithMongoose.mongooseConnection = cached;
+}
+
 export async function connectDB(): Promise<void> {
-  const uri = process.env.MONGO_URI || 'mongodb://localhost:27017/vedaai';
-  
+  if (cached.conn) return;
+
+  const uri = process.env.MONGODB_URI || process.env.MONGO_URI || 'mongodb://localhost:27017/vedaai';
+
   try {
-    await mongoose.connect(uri);
-    console.log('✅ MongoDB connected');
+    if (!cached.promise) {
+      cached.promise = mongoose.connect(uri, {
+        bufferCommands: false,
+        maxPoolSize: process.env.VERCEL ? 5 : 10,
+      });
+    }
+
+    cached.conn = await cached.promise;
+    console.log('MongoDB connected');
   } catch (err) {
-    console.error('❌ MongoDB connection error:', err);
+    cached.promise = null;
+    console.error('MongoDB connection error:', err);
     throw err;
   }
 
-  mongoose.connection.on('error', (err) => {
-    console.error('MongoDB error:', err);
-  });
+  if (mongoose.connection.listenerCount('error') === 0) {
+    mongoose.connection.on('error', (err) => {
+      console.error('MongoDB error:', err);
+    });
+  }
 
-  mongoose.connection.on('disconnected', () => {
-    console.warn('MongoDB disconnected');
-  });
+  if (mongoose.connection.listenerCount('disconnected') === 0) {
+    mongoose.connection.on('disconnected', () => {
+      console.warn('MongoDB disconnected');
+      cached.conn = null;
+      cached.promise = null;
+    });
+  }
 }

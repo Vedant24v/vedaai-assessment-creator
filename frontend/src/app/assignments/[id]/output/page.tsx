@@ -4,9 +4,8 @@ import { use, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Sidebar from '@/components/Sidebar';
 import Header from '@/components/Header';
-import { useAssignmentStore } from '@/store/assignmentStore';
-import { useSocket, joinAssignmentRoom } from '@/lib/socket';
-import { GeneratedPaper, GeneratedSection, GeneratedQuestion } from '@/store/assignmentStore';
+import { GeneratedPaper, GeneratedQuestion, GeneratedSection, useAssignmentStore } from '@/store/assignmentStore';
+import { joinAssignmentRoom, useSocket } from '@/lib/socket';
 
 interface PageParams {
   params: Promise<{ id: string }>;
@@ -14,11 +13,7 @@ interface PageParams {
 
 function DifficultyBadge({ difficulty }: { difficulty: 'easy' | 'medium' | 'hard' }) {
   const labels = { easy: 'Easy', medium: 'Moderate', hard: 'Hard' };
-  return (
-    <span className={`difficulty-badge ${difficulty}`}>
-      {labels[difficulty] || difficulty}
-    </span>
-  );
+  return <span className={`difficulty-badge ${difficulty}`}>{labels[difficulty]}</span>;
 }
 
 function GeneratingState() {
@@ -31,7 +26,7 @@ function GeneratingState() {
       </div>
       <h2 className="generating-title">AI is crafting your question paper</h2>
       <p className="generating-desc">
-        Generating structured questions with proper difficulty distribution and marks allocation...
+        Generating structured questions with balanced difficulty and marks allocation.
       </p>
       <div className="progress-dots">
         <div className="progress-dot" />
@@ -44,43 +39,22 @@ function GeneratingState() {
 
 function QuestionPaperView({ paper, assignmentId }: { paper: GeneratedPaper; assignmentId: string }) {
   const printRef = useRef<HTMLDivElement>(null);
-  const { regenerateAssignment } = useAssignmentStore();
+  const { regenerateAssignment, fetchAssignment } = useAssignmentStore();
   const [isRegenerating, setIsRegenerating] = useState(false);
 
-  // Counter for global question numbering
-  let questionCounter = 0;
-
-  const handlePrint = () => {
-    window.print();
-  };
-
-  const handleRegenerate = async () => {
+  async function handleRegenerate() {
     if (!confirm('Regenerate this question paper? The current paper will be replaced.')) return;
     setIsRegenerating(true);
     await regenerateAssignment(assignmentId);
+    await fetchAssignment(assignmentId);
     setIsRegenerating(false);
-  };
-
-  const handleDownloadPDF = () => {
-    // Use browser print for PDF
-    const style = document.createElement('style');
-    style.innerHTML = `
-      @media print {
-        body > * { display: none; }
-        #printable-paper { display: block !important; }
-      }
-    `;
-    document.head.appendChild(style);
-    window.print();
-    document.head.removeChild(style);
-  };
+  }
 
   return (
     <div className="paper-container" id="question-paper-container">
-      {/* Action Bar */}
       <div className="paper-action-bar" id="paper-action-bar">
         <div className="paper-action-bar-title">
-          ✨ Certainly! Here are customised Question Papers for your {paper.subject} classes
+          Custom question paper for {paper.subject} / {paper.className}
         </div>
         <div className="paper-actions">
           <button
@@ -90,7 +64,10 @@ function QuestionPaperView({ paper, assignmentId }: { paper: GeneratedPaper; ass
             id="regenerate-paper-btn"
           >
             {isRegenerating ? (
-              <><span className="spinner" style={{ width: '12px', height: '12px', borderWidth: '2px' }} /> Regenerating...</>
+              <>
+                <span className="spinner" style={{ width: 12, height: 12, borderWidth: 2 }} />
+                Regenerating...
+              </>
             ) : (
               <>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -101,7 +78,7 @@ function QuestionPaperView({ paper, assignmentId }: { paper: GeneratedPaper; ass
             )}
           </button>
 
-          <button className="btn btn-primary btn-sm" onClick={handleDownloadPDF} id="download-pdf-btn">
+          <button className="btn btn-primary btn-sm" onClick={() => window.print()} id="download-pdf-btn">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
             </svg>
@@ -110,31 +87,26 @@ function QuestionPaperView({ paper, assignmentId }: { paper: GeneratedPaper; ass
         </div>
       </div>
 
-      {/* Question Paper */}
       <div className="question-paper" ref={printRef} id="printable-paper">
-        {/* School Header */}
         <div className="paper-school-header">
           <div className="paper-school-name">{paper.schoolName || 'Delhi Public School, Sector-4, Bokaro'}</div>
           <div className="paper-subject-line">Subject: {paper.subject}</div>
           <div className="paper-class-line">Class: {paper.className}</div>
         </div>
 
-        {/* Meta Information */}
         <div className="paper-meta">
           <div className="paper-meta-item">
             <strong>Time Allowed:</strong> {paper.duration} minutes
           </div>
-          <div className="paper-meta-item" style={{ textAlign: 'right' }}>
+          <div className="paper-meta-item paper-meta-right">
             <strong>Maximum Marks:</strong> {paper.totalMarks}
           </div>
         </div>
 
-        {/* General Instructions */}
         <div className="paper-general-instruction">
-          All questions are compulsory unless stated otherwise.
+          General Instructions: All questions are compulsory unless stated otherwise. Read every question carefully.
         </div>
 
-        {/* Student Info Section */}
         <div className="student-info-section">
           <div className="student-info-row">
             <div className="student-info-field">
@@ -142,33 +114,37 @@ function QuestionPaperView({ paper, assignmentId }: { paper: GeneratedPaper; ass
               <div className="student-info-line" />
             </div>
             <div className="student-info-field">
-              <span className="student-info-label">Roll Number:</span>
+              <span className="student-info-label">Roll No:</span>
               <div className="student-info-line" />
             </div>
           </div>
           <div className="student-info-row">
-            <div className="student-info-field" style={{ maxWidth: '200px' }}>
+            <div className="student-info-field">
               <span className="student-info-label">Section:</span>
               <div className="student-info-line" />
             </div>
-            <div className="student-info-field" style={{ flex: 0 }}>
-              <span className="student-info-label">Class: {paper.className}</span>
+            <div className="student-info-field">
+              <span className="student-info-label">Class:</span>
+              <div className="student-info-line" />
             </div>
           </div>
         </div>
 
-        {/* Question Sections */}
-        {paper.sections.map((section: GeneratedSection) => (
+        {paper.sections.map((section: GeneratedSection, sectionIndex) => {
+          const questionOffset = paper.sections
+            .slice(0, sectionIndex)
+            .reduce((sum, previousSection) => sum + previousSection.questions.length, 0);
+
+          return (
           <div key={section.id} className="paper-section" id={`section-${section.id}`}>
             <h2 className="paper-section-title">{section.title}</h2>
             <p className="paper-section-instruction">{section.instruction}</p>
 
-            {section.questions.map((question: GeneratedQuestion) => {
-              questionCounter++;
-              const num = questionCounter;
+            {section.questions.map((question: GeneratedQuestion, questionIndex) => {
+              const questionNumber = questionOffset + questionIndex + 1;
               return (
                 <div key={question.id} className="paper-question" id={`question-${question.id}`}>
-                  <span className="paper-question-num">{num}.</span>
+                  <span className="paper-question-num">{questionNumber}.</span>
                   <div className="paper-question-content">
                     <p className="paper-question-text">{question.text}</p>
                     <div className="paper-question-footer">
@@ -182,15 +158,15 @@ function QuestionPaperView({ paper, assignmentId }: { paper: GeneratedPaper; ass
               );
             })}
           </div>
-        ))}
+          );
+        })}
 
-        {/* Answer Key */}
         {paper.answerKey && paper.answerKey.length > 0 && (
           <div className="answer-key-section" id="answer-key-section">
             <h3 className="answer-key-title">Answer Key</h3>
-            {paper.answerKey.map((ak, idx) => (
-              <div key={ak.questionId} style={{ marginBottom: '8px', fontSize: '13px', color: '#333' }}>
-                <strong>{idx + 1}.</strong> {ak.answer}
+            {paper.answerKey.map((answer, index) => (
+              <div key={`${answer.questionId}-${index}`} className="answer-key-item">
+                <strong>{index + 1}.</strong> {answer.answer}
               </div>
             ))}
           </div>
@@ -205,25 +181,23 @@ export default function AssignmentOutputPage({ params }: PageParams) {
   const router = useRouter();
   const { currentAssignment, fetchAssignment, isLoading } = useAssignmentStore();
 
-  // Initialize WebSocket
   useSocket();
 
   useEffect(() => {
-    fetchAssignment(id);
+    void fetchAssignment(id);
     joinAssignmentRoom(id);
   }, [id, fetchAssignment]);
 
-  // Auto-poll when pending/processing
   useEffect(() => {
     if (!currentAssignment) return;
     if (currentAssignment.jobStatus === 'completed' || currentAssignment.jobStatus === 'failed') return;
 
-    const interval = setInterval(() => {
-      fetchAssignment(id);
+    const interval = window.setInterval(() => {
+      void fetchAssignment(id);
     }, 3000);
 
-    return () => clearInterval(interval);
-  }, [currentAssignment?.jobStatus, id, fetchAssignment]);
+    return () => window.clearInterval(interval);
+  }, [currentAssignment, currentAssignment?.jobStatus, id, fetchAssignment]);
 
   if (isLoading && !currentAssignment) {
     return (
@@ -231,7 +205,7 @@ export default function AssignmentOutputPage({ params }: PageParams) {
         <Sidebar />
         <main className="app-main">
           <Header breadcrumb="AI Teacher's Toolkit" showBack />
-          <div className="page-content" style={{ marginTop: 'var(--header-height)' }}>
+          <div className="page-content">
             <div className="loading-spinner">
               <div className="spinner spinner-lg" />
               <span>Loading...</span>
@@ -248,9 +222,9 @@ export default function AssignmentOutputPage({ params }: PageParams) {
         <Sidebar />
         <main className="app-main">
           <Header breadcrumb="Assignment" showBack />
-          <div className="page-content" style={{ marginTop: 'var(--header-height)', textAlign: 'center', paddingTop: '60px' }}>
-            <h2 style={{ fontSize: '20px', color: 'var(--color-text-secondary)' }}>Assignment not found</h2>
-            <button className="btn btn-primary" onClick={() => router.push('/assignments')} style={{ marginTop: '20px' }}>
+          <div className="page-content empty-state">
+            <h2 className="empty-state-title">Assignment not found</h2>
+            <button className="btn btn-primary" onClick={() => router.push('/assignments')}>
               Go to Assignments
             </button>
           </div>
@@ -259,112 +233,34 @@ export default function AssignmentOutputPage({ params }: PageParams) {
     );
   }
 
-  const { jobStatus, generatedPaper, jobError, title } = currentAssignment;
+  const { jobStatus, generatedPaper, jobError } = currentAssignment;
 
   return (
     <div className="app-layout">
       <Sidebar />
-
       <main className="app-main">
         <Header breadcrumb="AI Teacher's Toolkit" showBack />
+        <div className="page-content">
+          {jobStatus === 'pending' || jobStatus === 'processing' ? <GeneratingState /> : null}
 
-        <div className="page-content" style={{ marginTop: 'var(--header-height)' }}>
-          {/* Sidebar-style nav for output page */}
-          <div style={{ display: 'flex', gap: '24px' }}>
-            {/* Left mini nav */}
-            <div style={{
-              width: '160px',
-              flexShrink: 0,
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '4px',
-            }}>
-              {[
-                { label: 'Home', href: '/' },
-                { label: 'My Groups', href: '/groups' },
-                { label: 'Assignments', href: '/assignments' },
-                { label: "AI Teacher's Toolkit", href: '/toolkit', active: true },
-                { label: 'My Library', href: '/library' },
-              ].map((item) => (
-                <a
-                  key={item.href}
-                  href={item.href}
-                  style={{
-                    padding: '8px 12px',
-                    fontSize: '13px',
-                    borderRadius: 'var(--radius-sm)',
-                    textDecoration: 'none',
-                    color: item.active ? 'var(--color-primary)' : 'var(--color-text-secondary)',
-                    background: item.active ? 'var(--color-primary-light)' : 'transparent',
-                    fontWeight: item.active ? '600' : '400',
-                  }}
-                >
-                  {item.label}
-                </a>
-              ))}
-              
-              {/* School card mini */}
-              <div style={{
-                marginTop: '24px',
-                padding: '10px',
-                background: 'white',
-                borderRadius: 'var(--radius-md)',
-                border: '1px solid var(--color-border)',
-              }}>
-                <div style={{ fontSize: '11px', fontWeight: '600', color: 'var(--color-text-primary)' }}>
-                  Delhi Public School
-                </div>
-                <div style={{ fontSize: '10px', color: 'var(--color-text-muted)', marginTop: '2px' }}>
-                  Bokaro, India
-                </div>
-              </div>
+          {jobStatus === 'failed' && (
+            <div className="generating-card">
+              <h2 className="generating-title">Generation Failed</h2>
+              <p className="generating-desc">{jobError || 'An unexpected error occurred. Please try again.'}</p>
+              <button
+                className="btn btn-primary"
+                onClick={() => void useAssignmentStore.getState().regenerateAssignment(id)}
+                id="retry-generation-btn"
+                style={{ marginTop: 24 }}
+              >
+                Try Again
+              </button>
             </div>
+          )}
 
-            {/* Main content */}
-            <div style={{ flex: 1, minWidth: 0 }}>
-              {/* Status indicator */}
-              {(jobStatus === 'pending' || jobStatus === 'processing') && (
-                <GeneratingState />
-              )}
-
-              {jobStatus === 'failed' && (
-                <div style={{
-                  background: 'white',
-                  border: '1px solid var(--color-border)',
-                  borderRadius: 'var(--radius-xl)',
-                  padding: '48px',
-                  textAlign: 'center',
-                }}>
-                  <div style={{
-                    width: '64px', height: '64px',
-                    background: 'rgba(239,68,68,0.1)',
-                    borderRadius: 'var(--radius-xl)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    margin: '0 auto 20px',
-                  }}>
-                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#EF4444" strokeWidth="2">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                    </svg>
-                  </div>
-                  <h2 style={{ fontSize: '18px', fontWeight: '700', marginBottom: '8px' }}>Generation Failed</h2>
-                  <p style={{ color: 'var(--color-text-secondary)', fontSize: '14px', marginBottom: '24px' }}>
-                    {jobError || 'An unexpected error occurred. Please try again.'}
-                  </p>
-                  <button
-                    className="btn btn-primary"
-                    onClick={() => useAssignmentStore.getState().regenerateAssignment(id)}
-                    id="retry-generation-btn"
-                  >
-                    Try Again
-                  </button>
-                </div>
-              )}
-
-              {jobStatus === 'completed' && generatedPaper && (
-                <QuestionPaperView paper={generatedPaper} assignmentId={id} />
-              )}
-            </div>
-          </div>
+          {jobStatus === 'completed' && generatedPaper && (
+            <QuestionPaperView paper={generatedPaper} assignmentId={id} />
+          )}
         </div>
       </main>
     </div>

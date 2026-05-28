@@ -26,7 +26,7 @@ export function initSocket(httpServer: HttpServer): void {
     });
   });
 
-  console.log('✅ Socket.IO initialized');
+  console.log('Socket.IO initialized');
 }
 
 export function getIO(): SocketIOServer {

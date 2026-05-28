@@ -70,14 +70,14 @@ export default function AssignmentsPage() {
               <EmptyIllustration />
               <h1 className="empty-state-title">No assignments yet</h1>
               <p className="empty-state-desc">
-                Create your first assignment to start collecting and grading student submissions.
-                You can set up rubrics, define marking criteria, and let AI assist with grading.
+                Create your first AI assessment with source material, structured question types,
+                answer keys, and print-ready output.
               </p>
               <Link href="/assignments/create" className="btn btn-primary" id="create-first-assignment-btn">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
                 </svg>
-                + Create Your First Assignment
+                Create Your First Assignment
               </Link>
             </div>
           ) : (
@@ -142,7 +142,7 @@ export default function AssignmentsPage() {
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
                 </svg>
-                + Create Assignment
+                Create Assignment
               </Link>
             </>
           )}

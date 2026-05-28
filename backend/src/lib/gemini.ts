@@ -6,7 +6,7 @@ interface QuestionType {
   marks: number;
 }
 
-interface GenerationInput {
+export interface GenerationInput {
   subject: string;
   className: string;
   totalMarks: number;
@@ -41,68 +41,84 @@ export interface GeneratedPaper {
   answerKey?: { questionId: string; answer: string }[];
 }
 
-let genAI: GoogleGenerativeAI;
-let model: GenerativeModel;
+let genAI: GoogleGenerativeAI | null = null;
+let model: GenerativeModel | null = null;
 
 function getModel(): GenerativeModel {
-  if (!model) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey || apiKey === 'your_gemini_api_key_here') {
-      throw new Error('GEMINI_API_KEY not configured. Please add your Gemini API key to the .env file.');
-    }
-    genAI = new GoogleGenerativeAI(apiKey);
-    model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+  if (model) return model;
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey || apiKey === 'your_gemini_api_key_here') {
+    throw new Error('GEMINI_API_KEY is not configured');
   }
+
+  genAI = new GoogleGenerativeAI(apiKey);
+  model = genAI.getGenerativeModel({
+    model: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
+    generationConfig: {
+      temperature: 0.55,
+      responseMimeType: 'application/json',
+    },
+  });
   return model;
+}
+
+function calculatedTotal(input: GenerationInput) {
+  return input.totalMarks || input.questionTypes.reduce((sum, qt) => sum + qt.count * qt.marks, 0);
 }
 
 function buildPrompt(input: GenerationInput): string {
   const questionTypesSummary = input.questionTypes
-    .map(qt => `- ${qt.type}: ${qt.count} questions × ${qt.marks} mark(s) each`)
+    .map((qt, index) => `${index + 1}. ${qt.type}: exactly ${qt.count} question(s), ${qt.marks} mark(s) each`)
     .join('\n');
 
   const totalQuestions = input.questionTypes.reduce((sum, qt) => sum + qt.count, 0);
-  const calculatedTotal = input.questionTypes.reduce((sum, qt) => sum + qt.count * qt.marks, 0);
 
-  return `You are an expert educational assessment creator. Generate a structured question paper in valid JSON format.
+  return `You are an expert K-12 assessment designer. Generate a polished school question paper as strict JSON.
 
-ASSIGNMENT DETAILS:
+Assignment:
 - Subject: ${input.subject}
 - Class: ${input.className}
-- Total Marks: ${input.totalMarks || calculatedTotal}
+- Total marks: ${calculatedTotal(input)}
 - Duration: ${input.duration || 45} minutes
-- Total Questions: ${totalQuestions}
+- Total questions: ${totalQuestions}
 
-QUESTION TYPES REQUIRED:
+Required section plan:
 ${questionTypesSummary}
 
-${input.additionalInstructions ? `ADDITIONAL INSTRUCTIONS:\n${input.additionalInstructions}\n` : ''}
-${input.contentText ? `REFERENCE CONTENT:\n${input.contentText.substring(0, 2000)}\n` : ''}
+Difficulty distribution:
+- About 40% easy
+- About 40% medium
+- About 20% hard
 
-IMPORTANT RULES:
-1. Generate EXACTLY the number of questions specified for each type
-2. Assign difficulty: approximately 40% easy, 40% medium, 20% hard
-3. Questions should be appropriate for the subject and class level
-4. Group questions into sections (Section A for first type, Section B for second, etc.)
-5. Each section must have a clear instruction line
-6. Do NOT include difficulty in the question text
+${input.additionalInstructions ? `Teacher instructions:\n${input.additionalInstructions}\n` : ''}
+${input.contentText ? `Reference material. Use this only as context, do not copy long passages:\n${input.contentText.slice(0, 3000)}\n` : ''}
 
-Respond with ONLY a valid JSON object (no markdown, no explanation) in this exact format:
+Rules:
+1. Return JSON only. No markdown and no prose outside the JSON object.
+2. Create one section per requested question type, in the same order.
+3. Each section must contain exactly the requested count.
+4. Each question must include id, text, difficulty, marks, and type.
+5. difficulty must be exactly one of: easy, medium, hard.
+6. Include an answerKey array with one concise answer per question.
+7. Do not place difficulty labels inside question text.
+
+JSON shape:
 {
-  "schoolName": "Delhi Public School",
+  "schoolName": "Delhi Public School, Sector-4, Bokaro",
   "subject": "${input.subject}",
   "className": "${input.className}",
-  "totalMarks": ${input.totalMarks || calculatedTotal},
+  "totalMarks": ${calculatedTotal(input)},
   "duration": ${input.duration || 45},
   "sections": [
     {
       "id": "section-a",
-      "title": "Section A",
-      "instruction": "Attempt all questions. Each question carries N marks.",
+      "title": "Section A - Multiple Choice Questions",
+      "instruction": "Attempt all questions. Each question carries 1 mark.",
       "questions": [
         {
           "id": "q1",
-          "text": "Question text here",
+          "text": "Question text",
           "difficulty": "easy",
           "marks": 1,
           "type": "Multiple Choice Questions"
@@ -111,138 +127,257 @@ Respond with ONLY a valid JSON object (no markdown, no explanation) in this exac
     }
   ],
   "answerKey": [
-    {
-      "questionId": "q1",
-      "answer": "Answer text here"
-    }
+    { "questionId": "q1", "answer": "Concise answer" }
   ]
 }`;
 }
 
-export async function generateQuestionPaper(input: GenerationInput): Promise<GeneratedPaper> {
-  const geminiModel = getModel();
-  const prompt = buildPrompt(input);
+function extractJson(text: string) {
+  const trimmed = text.trim();
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) return trimmed;
 
-  console.log('🤖 Calling Gemini AI for question generation...');
-  
-  const result = await geminiModel.generateContent(prompt);
-  const response = result.response.text();
-  
-  // Clean up the response - remove markdown code blocks if present
-  let cleanJson = response.trim();
-  if (cleanJson.startsWith('```json')) {
-    cleanJson = cleanJson.replace(/^```json\n?/, '').replace(/\n?```$/, '');
-  } else if (cleanJson.startsWith('```')) {
-    cleanJson = cleanJson.replace(/^```\n?/, '').replace(/\n?```$/, '');
-  }
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) return fenced[1].trim();
 
-  let parsed: GeneratedPaper;
-  try {
-    parsed = JSON.parse(cleanJson) as GeneratedPaper;
-  } catch {
-    console.error('Failed to parse Gemini response:', cleanJson.substring(0, 500));
-    throw new Error('AI returned invalid JSON response. Please try again.');
-  }
+  const first = trimmed.indexOf('{');
+  const last = trimmed.lastIndexOf('}');
+  if (first >= 0 && last > first) return trimmed.slice(first, last + 1);
 
-  // Validate structure
-  if (!parsed.sections || !Array.isArray(parsed.sections)) {
+  return trimmed;
+}
+
+function normalizePaper(parsed: GeneratedPaper, input: GenerationInput): GeneratedPaper {
+  if (!parsed || !Array.isArray(parsed.sections)) {
     throw new Error('AI response missing sections array');
   }
 
-  // Ensure all questions have IDs
-  parsed.sections.forEach((section, si) => {
-    section.questions.forEach((q, qi) => {
-      if (!q.id) q.id = `s${si + 1}q${qi + 1}`;
-    });
-  });
-
-  console.log(`✅ Generated paper with ${parsed.sections.length} sections`);
-  return parsed;
-}
-
-// Fallback: generate without AI (for demo/testing when no API key)
-export function generateMockPaper(input: GenerationInput): GeneratedPaper {
-  const sections: GeneratedSection[] = [];
+  const sourceAnswers = Array.isArray(parsed.answerKey) ? parsed.answerKey : [];
   const answerKey: { questionId: string; answer: string }[] = [];
 
-  const difficulties: ('easy' | 'medium' | 'hard')[] = ['easy', 'medium', 'hard'];
-  const sectionLetters = ['A', 'B', 'C', 'D', 'E'];
+  parsed.sections = input.questionTypes.map((qt, sectionIndex) => {
+    const source = parsed.sections[sectionIndex] || {
+      id: `section-${String.fromCharCode(97 + sectionIndex)}`,
+      title: `Section ${String.fromCharCode(65 + sectionIndex)} - ${qt.type}`,
+      instruction: getInstruction(qt),
+      questions: [],
+    };
 
-  input.questionTypes.forEach((qt, sectionIdx) => {
-    const sectionQuestions: GeneratedQuestion[] = [];
+    const questions = Array.isArray(source.questions) ? source.questions.slice(0, qt.count) : [];
+    while (questions.length < qt.count) {
+      const mock = buildMockQuestion(input, qt, sectionIndex, questions.length);
+      questions.push(mock.question);
+    }
 
-    for (let i = 0; i < qt.count; i++) {
-      const difficulty = difficulties[Math.floor((i / qt.count) * 3)] || 'medium';
-      const qId = `s${sectionIdx + 1}q${i + 1}`;
-      
-      sectionQuestions.push({
-        id: qId,
-        text: getSampleQuestion(qt.type, input.subject, i + 1),
+    const normalizedQuestions = questions.map((question, questionIndex) => {
+      const id = `s${sectionIndex + 1}q${questionIndex + 1}`;
+      const difficulty = normalizeDifficulty(question.difficulty, sectionIndex, questionIndex, input.questionTypes);
+      const normalized = {
+        id,
+        text: question.text || buildQuestionText(qt.type, input.subject, questionIndex + 1),
         difficulty,
         marks: qt.marks,
         type: qt.type,
-      });
+      };
+
+      const sourceAnswer =
+        sourceAnswers.find((answer) => answer.questionId === question.id || answer.questionId === id) ||
+        sourceAnswers[answerKey.length];
 
       answerKey.push({
-        questionId: qId,
-        answer: `Sample answer for question ${i + 1}`,
+        questionId: id,
+        answer: sourceAnswer?.answer || buildAnswer(qt.type, input.subject, questionIndex + 1),
       });
-    }
 
-    sections.push({
-      id: `section-${sectionLetters[sectionIdx]?.toLowerCase() || sectionIdx}`,
-      title: `Section ${sectionLetters[sectionIdx] || sectionIdx + 1}`,
-      instruction: getInstruction(qt.type),
-      questions: sectionQuestions,
+      return normalized;
     });
+
+    return {
+      id: source.id || `section-${String.fromCharCode(97 + sectionIndex)}`,
+      title: source.title || `Section ${String.fromCharCode(65 + sectionIndex)} - ${qt.type}`,
+      instruction: source.instruction || getInstruction(qt),
+      questions: normalizedQuestions,
+    };
   });
 
   return {
-    schoolName: 'Delhi Public School',
+    schoolName: parsed.schoolName || 'Delhi Public School, Sector-4, Bokaro',
     subject: input.subject,
     className: input.className,
-    totalMarks: input.totalMarks,
-    duration: input.duration,
+    totalMarks: calculatedTotal(input),
+    duration: input.duration || 45,
+    sections: parsed.sections,
+    answerKey,
+  };
+}
+
+export async function generateQuestionPaper(input: GenerationInput): Promise<GeneratedPaper> {
+  try {
+    const geminiModel = getModel();
+    const prompt = buildPrompt(input);
+    const result = await geminiModel.generateContent(prompt);
+    const response = result.response.text();
+    const parsed = JSON.parse(extractJson(response)) as GeneratedPaper;
+    return normalizePaper(parsed, input);
+  } catch (err) {
+    if (isExpectedFallbackError(err)) {
+      return generateMockPaper(input);
+    }
+
+    console.warn('Gemini generation failed, using mock generator:', err);
+    return generateMockPaper(input);
+  }
+}
+
+function isExpectedFallbackError(err: unknown) {
+  const message = err instanceof Error ? err.message : String(err);
+  return (
+    message.includes('GEMINI_API_KEY') ||
+    message.includes('API key') ||
+    message.includes('429') ||
+    message.includes('Quota') ||
+    message.includes('quota') ||
+    message.includes('503') ||
+    message.includes('Service Unavailable')
+  );
+}
+
+export function generateMockPaper(input: GenerationInput): GeneratedPaper {
+  const answerKey: { questionId: string; answer: string }[] = [];
+  const sections = input.questionTypes.map((qt, sectionIndex) => {
+    const questions: GeneratedQuestion[] = [];
+
+    for (let questionIndex = 0; questionIndex < qt.count; questionIndex++) {
+      const built = buildMockQuestion(input, qt, sectionIndex, questionIndex);
+      questions.push(built.question);
+      answerKey.push(built.answer);
+    }
+
+    return {
+      id: `section-${String.fromCharCode(97 + sectionIndex)}`,
+      title: `Section ${String.fromCharCode(65 + sectionIndex)} - ${qt.type}`,
+      instruction: getInstruction(qt),
+      questions,
+    };
+  });
+
+  return {
+    schoolName: 'Delhi Public School, Sector-4, Bokaro',
+    subject: input.subject,
+    className: input.className,
+    totalMarks: calculatedTotal(input),
+    duration: input.duration || 45,
     sections,
     answerKey,
   };
 }
 
-function getSampleQuestion(type: string, subject: string, num: number): string {
-  const questionMap: Record<string, string[]> = {
+function buildMockQuestion(input: GenerationInput, qt: QuestionType, sectionIndex: number, questionIndex: number) {
+  const id = `s${sectionIndex + 1}q${questionIndex + 1}`;
+  const referenceTopic = pickReferenceTopic(input.contentText, questionIndex);
+  return {
+    question: {
+      id,
+      text: buildQuestionText(qt.type, input.subject, questionIndex + 1, referenceTopic),
+      difficulty: normalizeDifficulty(undefined, sectionIndex, questionIndex, input.questionTypes),
+      marks: qt.marks,
+      type: qt.type,
+    },
+    answer: {
+      questionId: id,
+      answer: buildAnswer(qt.type, input.subject, questionIndex + 1, referenceTopic),
+    },
+  };
+}
+
+function normalizeDifficulty(
+  difficulty: unknown,
+  sectionIndex: number,
+  questionIndex: number,
+  questionTypes: QuestionType[]
+): 'easy' | 'medium' | 'hard' {
+  if (difficulty === 'easy' || difficulty === 'medium' || difficulty === 'hard') return difficulty;
+
+  const globalIndex =
+    questionTypes.slice(0, sectionIndex).reduce((sum, qt) => sum + qt.count, 0) + questionIndex;
+  const total = Math.max(1, questionTypes.reduce((sum, qt) => sum + qt.count, 0));
+  const ratio = globalIndex / total;
+
+  if (ratio < 0.4) return 'easy';
+  if (ratio < 0.8) return 'medium';
+  return 'hard';
+}
+
+function getInstruction(qt: QuestionType): string {
+  return `Attempt all questions. Each question carries ${qt.marks} ${qt.marks === 1 ? 'mark' : 'marks'}.`;
+}
+
+function pickReferenceTopic(contentText: string | undefined, index: number) {
+  if (!contentText) return '';
+
+  const sentences = contentText
+    .replace(/\s+/g, ' ')
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence.length >= 35 && sentence.length <= 220);
+
+  if (sentences.length === 0) {
+    return contentText.replace(/\s+/g, ' ').slice(0, 160).trim();
+  }
+
+  return sentences[index % sentences.length];
+}
+
+function buildQuestionText(type: string, subject: string, num: number, referenceTopic = ''): string {
+  const context = referenceTopic ? ` from the uploaded material: "${referenceTopic}"` : ` from ${subject}`;
+  const templates: Record<string, string[]> = {
     'Multiple Choice Questions': [
-      `Which of the following best describes ${subject}?`,
-      `What is the primary purpose of ${subject} concepts?`,
-      `Which statement about ${subject} is correct?`,
-      `In the context of ${subject}, what does the term refer to?`,
+      `Which option best explains the key idea${context}?`,
+      `Choose the correct statement related to the concept${context}.`,
+      `Identify the most suitable answer for the idea${context}.`,
+      `Which example correctly applies the principle${context}?`,
     ],
     'Short Answer Questions': [
-      `Explain the importance of ${subject} in everyday life.`,
-      `Define the key concept in ${subject} studied this semester.`,
-      `Describe two applications of ${subject}.`,
-      `What are the main characteristics of ${subject}?`,
+      `Define the important concept${context} in two or three sentences.`,
+      `State two features of the topic${context}.`,
+      `Explain why the concept${context} is useful in real situations.`,
+      `Write a brief note on one application of the idea${context}.`,
+    ],
+    'Long Answer Questions': [
+      `Explain the topic${context} in detail with suitable examples.`,
+      `Compare two important ideas${context} and support your answer with reasons.`,
+      `Describe the process involved in the topic${context} step by step.`,
     ],
     'Diagram-based Questions': [
-      `Draw and label a diagram representing the main concept in ${subject}.`,
-      `Sketch and explain the process discussed in ${subject}.`,
+      `Draw a neat, labelled diagram for the main process${context}.`,
+      `Sketch and explain the structure or model related to the topic${context}.`,
     ],
     'Numerical Problems': [
-      `Solve the following problem related to ${subject}: Calculate the value given the data provided.`,
-      `A practical scenario in ${subject} requires you to compute the result.`,
+      `Solve a numerical problem based on the topic${context}, using the correct formula and showing all steps.`,
+      `A value is given in a situation${context}. Calculate the required result and state the unit.`,
+    ],
+    'Fill in the Blanks': [
+      `Fill in the blank using the uploaded material: A core idea${context} is ________.`,
+      `Fill in the blank: The result of the process${context} is ________.`,
+    ],
+    'True / False': [
+      `State whether the following statement is true or false and correct it if false: This is a key concept${context}.`,
+      `True or false: The method${context} can be applied only in one situation.`,
+    ],
+    'Match the Following': [
+      `Match the terms${context} in Column A with the correct descriptions in Column B.`,
+      `Match each concept${context} with its correct example.`,
     ],
   };
 
-  const questions = questionMap[type] || [`Question ${num} on ${subject}`];
+  const questions = templates[type] || [`Answer the following question on ${subject}.`];
   return questions[(num - 1) % questions.length];
 }
 
-function getInstruction(type: string): string {
-  const instructions: Record<string, string> = {
-    'Multiple Choice Questions': 'Choose the correct option for each question. Each question carries equal marks.',
-    'Short Answer Questions': 'Answer all questions briefly. Write your answers clearly.',
-    'Diagram-based Questions': 'Draw neat, well-labelled diagrams wherever required.',
-    'Numerical Problems': 'Show all working steps. Marks may be awarded for correct method.',
-    'Long Answer Questions': 'Answer in detail. Support your answers with examples where possible.',
-  };
-  return instructions[type] || 'Attempt all questions in this section.';
+function buildAnswer(type: string, subject: string, num: number, referenceTopic = ''): string {
+  const context = referenceTopic || `the relevant ${subject} concept`;
+  if (type === 'Multiple Choice Questions') return `Correct option based on ${context}.`;
+  if (type === 'True / False') return `True/False with correction where required.`;
+  if (type === 'Numerical Problems') return `Use the correct formula, substitute values, calculate, and include units.`;
+  if (type === 'Diagram-based Questions') return `A neat labelled diagram with a short explanation.`;
+  return `Expected answer covering ${context} for question ${num}.`;
 }
