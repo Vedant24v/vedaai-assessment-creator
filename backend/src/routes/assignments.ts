@@ -113,7 +113,12 @@ router.post('/', async (req: Request, res: Response) => {
         if (!apiKey || apiKey === 'your_gemini_api_key_here') {
           paper = generateMockPaper(input);
         } else {
-          paper = await generateQuestionPaper(input);
+          try {
+            paper = await generateQuestionPaper(input);
+          } catch (apiErr) {
+            console.warn('Gemini API call failed, falling back to mock generator:', apiErr);
+            paper = generateMockPaper(input);
+          }
         }
 
         assignment.generatedPaper = paper;
@@ -211,9 +216,17 @@ router.patch('/:id/regenerate', async (req: Request, res: Response) => {
       // Synchronous on Vercel
       try {
         const apiKey = process.env.GEMINI_API_KEY;
-        const paper = (!apiKey || apiKey === 'your_gemini_api_key_here')
-          ? generateMockPaper(input)
-          : await generateQuestionPaper(input);
+        let paper;
+        if (!apiKey || apiKey === 'your_gemini_api_key_here') {
+          paper = generateMockPaper(input);
+        } else {
+          try {
+            paper = await generateQuestionPaper(input);
+          } catch (apiErr) {
+            console.warn('Gemini API call failed, falling back to mock generator:', apiErr);
+            paper = generateMockPaper(input);
+          }
+        }
 
         assignment.generatedPaper = paper;
         assignment.jobStatus = 'completed';
@@ -254,7 +267,13 @@ async function processInline(
       await new Promise(r => setTimeout(r, 2000));
       paper = generateMockPaper(input);
     } else {
-      paper = await generateQuestionPaper(input);
+      try {
+        paper = await generateQuestionPaper(input);
+      } catch (apiErr) {
+        console.warn('Gemini API call failed, falling back to mock generator:', apiErr);
+        await new Promise(r => setTimeout(r, 2000));
+        paper = generateMockPaper(input);
+      }
     }
 
     await Assignment.findByIdAndUpdate(assignmentId, { jobStatus: 'completed', generatedPaper: paper });
