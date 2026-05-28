@@ -1,5 +1,5 @@
 import mongoose, { Schema, Document } from 'mongoose';
-import { GeneratedPaper } from '../lib/gemini';
+import { GeneratedPaper } from '../lib/paperGeneration';
 
 export type JobStatus = 'pending' | 'processing' | 'completed' | 'failed';
 

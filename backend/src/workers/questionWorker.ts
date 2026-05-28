@@ -3,7 +3,7 @@ import { Worker, Job } from 'bullmq';
 import mongoose from 'mongoose';
 import { connectDB } from '../lib/db';
 import { initRedis, getRedisConnectionString } from '../lib/redis';
-import { generateQuestionPaper, generateMockPaper } from '../lib/gemini';
+import { generateQuestionPaper, generateMockPaper, hasLlmApiKey } from '../lib/llm';
 import { Assignment } from '../models/Assignment';
 import Redis from 'ioredis';
 
@@ -66,11 +66,10 @@ async function start() {
       };
 
       let generatedPaper;
-      const apiKey = process.env.GEMINI_API_KEY;
-      
-      if (!apiKey || apiKey === 'your_gemini_api_key_here') {
-        console.log('⚠️  No Gemini API key - using mock generation');
-        await new Promise(r => setTimeout(r, 2000)); // Realistic delay
+
+      if (!hasLlmApiKey()) {
+        console.log('⚠️  No LLM API key - using mock generation');
+        await new Promise((r) => setTimeout(r, 2000));
         generatedPaper = generateMockPaper(input);
       } else {
         generatedPaper = await generateQuestionPaper(input);

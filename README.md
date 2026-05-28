@@ -60,13 +60,14 @@
 
 | Step | Implementation |
 |------|----------------|
-| **Model** | Google Gemini (`GEMINI_MODEL`, default `gemini-2.0-flash`) via `@google/generative-ai` |
-| **Prompt** | `buildPrompt()` in `backend/src/lib/gemini.ts` — subject, class, marks, per-type section plan, difficulty mix, optional teacher notes and uploaded excerpt (≤3000 chars) |
-| **Structured output** | `generationConfig.responseMimeType: 'application/json'` plus explicit JSON shape in the prompt |
-| **Parsing** | `extractJson()` strips fences/prose; `JSON.parse`; `normalizePaper()` enforces counts, IDs, difficulties, and answer key |
-| **Resilience** | Mock generator when API key missing, quota exceeded, or parse/API errors |
+| **Provider** | **Groq** (default, free tier) when `GROQ_API_KEY` is set; optional **Gemini** via `LLM_PROVIDER=gemini` |
+| **Model** | `llama-3.3-70b-versatile` (Groq) or `gemini-2.0-flash` (Gemini) — configurable via env |
+| **Prompt** | `buildPrompt()` in `backend/src/lib/paperGeneration.ts` — shared across providers |
+| **Structured output** | Groq: OpenAI-compatible API + `response_format: json_object`; Gemini: `responseMimeType: application/json` |
+| **Parsing** | `extractJson()` → `JSON.parse` → `normalizePaper()` enforces counts, IDs, difficulties, and answer key |
+| **Resilience** | Mock generator when no API key; API errors surface to the UI (no silent mock fallback) |
 
-Swapping models (Claude, GPT, OSS) would mean replacing `getModel()` / `generateContent` while keeping the same prompt contract and `normalizePaper()` pipeline.
+Set `LLM_PROVIDER=groq|gemini|mock` to override auto-detection. Get a free Groq key at [console.groq.com](https://console.groq.com).
 
 ---
 
@@ -77,7 +78,7 @@ Swapping models (Claude, GPT, OSS) would mean replacing `getModel()` / `generate
 - **Node.js** 18+
 - **MongoDB** (local via Docker or Atlas)
 - **Redis** 5+ (optional; recommended for queue + worker path)
-- **Gemini API key** — [Google AI Studio](https://aistudio.google.com/app/apikey) (optional: mock mode without a valid key)
+- **Groq API key** (recommended, free) — [console.groq.com](https://console.groq.com), or Gemini / mock mode without a key
 
 ### 1. Infrastructure (MongoDB + Redis)
 
@@ -90,7 +91,7 @@ docker compose up -d
 ```bash
 cd backend
 cp .env.example .env
-# Set GEMINI_API_KEY in .env
+# Set GROQ_API_KEY in .env (see .env.example)
 npm install
 npm run dev
 ```
@@ -137,8 +138,11 @@ cd frontend && npm run build
 | `PORT` | HTTP port | `5000` |
 | `MONGO_URI` | MongoDB URI | `mongodb://localhost:27017/vedaai` |
 | `REDIS_URL` | Redis URL | `redis://localhost:6379` |
-| `GEMINI_API_KEY` | Gemini API key | Required for live AI (mock if missing/invalid) |
-| `GEMINI_MODEL` | Model id | `gemini-2.0-flash` |
+| `LLM_PROVIDER` | `groq`, `gemini`, or `mock` | Auto from keys |
+| `GROQ_API_KEY` | Groq API key (free tier) | Recommended for live AI |
+| `GROQ_MODEL` | Groq model id | `llama-3.3-70b-versatile` |
+| `GEMINI_API_KEY` | Gemini API key (optional) | — |
+| `GEMINI_MODEL` | Gemini model id | `gemini-2.0-flash` |
 | `FRONTEND_URL` | CORS / Socket origin | `http://localhost:3000` |
 
 ### Frontend (`frontend/.env.local`)
@@ -165,7 +169,7 @@ VedaAI/
 │       ├── index.ts          # Express + Socket.IO + Redis bridge
 │       ├── routes/           # assignments, upload
 │       ├── workers/          # BullMQ consumer
-│       └── lib/              # gemini, redis, db, socket
+│       └── lib/              # llm, groq, paperGeneration, redis, db
 ├── docker-compose.yml        # MongoDB + Redis
 └── README.md
 ```
@@ -210,7 +214,7 @@ VedaAI/
 |-------|--------|
 | Frontend | Next.js 16, React 19, TypeScript, Zustand, Socket.IO client |
 | Backend | Express, TypeScript, Mongoose, BullMQ, Socket.IO |
-| AI | Google Generative AI SDK (Gemini) |
+| AI | Groq (Llama 3.3) + optional Gemini |
 | Data | MongoDB, Redis |
 
 ---

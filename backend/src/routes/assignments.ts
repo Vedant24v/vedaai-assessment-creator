@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { randomUUID } from 'crypto';
 import { Assignment } from '../models/Assignment';
-import { GeneratedPaper, GenerationInput, generateQuestionPaper } from '../lib/gemini';
+import { GeneratedPaper, GenerationInput, generateQuestionPaper } from '../lib/llm';
 
 const router = Router();
 
