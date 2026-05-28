@@ -32,7 +32,10 @@ async function start() {
   const worker = new Worker(
     'question-generation',
     async (job: Job) => {
-      const { assignmentId } = job.data as { assignmentId: string };
+      const { assignmentId, contentText } = job.data as {
+        assignmentId: string;
+        contentText?: string;
+      };
       
       console.log(`🔄 Processing job ${job.id} for assignment ${assignmentId}`);
 
@@ -59,6 +62,7 @@ async function start() {
         duration: assignment.duration,
         questionTypes: assignment.questionTypes,
         additionalInstructions: assignment.additionalInstructions,
+        contentText: contentText?.slice(0, 3000),
       };
 
       let generatedPaper;

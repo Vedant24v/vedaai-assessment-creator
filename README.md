@@ -1,189 +1,220 @@
 # VedaAI – AI Assessment Creator
 
-> Full-stack AI-powered assessment generation system built for teachers.
+> Full-stack AI-powered assessment generation system for teachers. Built for structured prompt engineering, JSON parsing, and production-style async job handling.
 
-[![Tech Stack](https://img.shields.io/badge/Next.js-14-black)](https://nextjs.org)
-[![Backend](https://img.shields.io/badge/Express-TypeScript-blue)](https://expressjs.com)
-[![Database](https://img.shields.io/badge/MongoDB-Mongoose-green)](https://mongodb.com)
+**Submission:** [Google Form](https://docs.google.com/forms/d/e/1FAIpQLSeL19GVvVT8vZrTx67hMWKTXLyJSyhkW5XGyzh7Ppt5w8P1jw/viewform?usp=dialog)
 
 ---
 
-## 📸 Features
+## Features
 
-- **AI Question Paper Generation** — Generates structured, section-wise question papers using Google Gemini
-- **Real-time Updates** — WebSocket (Socket.IO) notifies the frontend when generation is complete
-- **Background Job Queue** — BullMQ + Redis for scalable, async processing
-- **Assignment Management** — Create, view, delete assignments with full persistence
-- **PDF Export** — Download question papers as PDF
-- **Responsive Design** — Works on mobile and desktop
+- **AI question paper generation** — Section-wise papers via Google Gemini (JSON mode) with a deterministic mock fallback
+- **Prompt structuring + parsing** — Strict JSON schema in the prompt; server-side extraction, normalization, and validation
+- **Real-time updates** — Socket.IO on the API server; optional BullMQ worker with Redis pub/sub bridge
+- **Background jobs** — BullMQ + Redis when available; inline generation when Redis is missing
+- **Assignment CRUD** — Create, list, view, delete, regenerate
+- **Reference uploads** — PDF, TXT, DOC, DOCX text extraction to steer generation
+- **PDF export** — Browser print-to-PDF with dedicated `@media print` styles
+- **Responsive UI** — Dashboard, multi-step create flow, exam-paper output view
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│                  Frontend                    │
-│  Next.js 14 + TypeScript + Zustand           │
-│  Socket.IO client (real-time updates)        │
-└──────────────┬──────────────────────────────┘
-               │ HTTP + WebSocket
-┌──────────────▼──────────────────────────────┐
-│                  Backend                     │
-│  Express + TypeScript                        │
-│  Socket.IO server                            │
-│  POST /api/assignments → BullMQ Queue        │
-└──────┬───────────────────────────────────────┘
-       │
-┌──────▼──────┐   ┌──────────────┐   ┌──────────────┐
-│  MongoDB    │   │    Redis     │   │  BullMQ      │
-│  Assignments│   │  Job Cache   │   │  Worker      │
-│  & Papers   │   │  & Queues    │   │  → Gemini AI │
-└─────────────┘   └──────────────┘   └──────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  Frontend (Next.js 16 + TypeScript + Zustand)                 │
+│  • Create / dashboard / output pages                          │
+│  • Socket.IO client + 3s polling fallback on output page      │
+└───────────────────────────┬──────────────────────────────────┘
+                            │ REST + WebSocket
+┌───────────────────────────▼──────────────────────────────────┐
+│  Backend (Express + TypeScript)                                │
+│  • POST /api/assignments → queue or inline generation          │
+│  • POST /api/upload → extract reference text                   │
+│  • Socket.IO rooms per assignment                              │
+└───────┬─────────────────┬──────────────────┬─────────────────┘
+        │                 │                  │
+┌───────▼───────┐ ┌───────▼───────┐ ┌────────▼─────────────────┐
+│  MongoDB      │ │  Redis        │ │  BullMQ worker (optional) │
+│  assignments  │ │  job queue +  │ │  Gemini / mock generation │
+│  + papers     │ │  socket bridge│ │  → pub/sub → Socket.IO    │
+└───────────────┘ └───────────────┘ └──────────────────────────┘
 ```
 
-### Flow
+### End-to-end flow
 
-1. Teacher fills the Create Assignment form
-2. Frontend `POST /api/assignments` → backend creates assignment + queues BullMQ job
-3. BullMQ worker picks up job → calls Gemini AI with structured prompt
-4. Worker parses JSON response → saves to MongoDB
-5. Worker emits `job:complete` via Socket.IO
-6. Frontend receives event → displays structured question paper
+1. Teacher completes the **Create Assignment** wizard (details → question types → optional file upload).
+2. Frontend `POST /api/assignments` with `questionTypes`, marks, and optional `contentText`.
+3. Backend persists the assignment and either:
+   - enqueues a BullMQ job (Redis 5+), or
+   - runs `processInline()` on the API process (no Redis / queue unavailable).
+4. Worker or inline handler calls **Gemini** with a structured prompt (`responseMimeType: application/json`).
+5. Response is parsed (`extractJson`), normalized to exact section/question counts, and saved to MongoDB.
+6. `job:complete` is emitted via Socket.IO (direct emit or Redis bridge from worker).
+7. Output page renders the paper; **Download as PDF** uses `window.print()` with print-only CSS.
 
 ---
 
-## 🚀 Quick Start
+## Approach (LLM + parsing)
+
+| Step | Implementation |
+|------|----------------|
+| **Model** | Google Gemini (`GEMINI_MODEL`, default `gemini-2.0-flash`) via `@google/generative-ai` |
+| **Prompt** | `buildPrompt()` in `backend/src/lib/gemini.ts` — subject, class, marks, per-type section plan, difficulty mix, optional teacher notes and uploaded excerpt (≤3000 chars) |
+| **Structured output** | `generationConfig.responseMimeType: 'application/json'` plus explicit JSON shape in the prompt |
+| **Parsing** | `extractJson()` strips fences/prose; `JSON.parse`; `normalizePaper()` enforces counts, IDs, difficulties, and answer key |
+| **Resilience** | Mock generator when API key missing, quota exceeded, or parse/API errors |
+
+Swapping models (Claude, GPT, OSS) would mean replacing `getModel()` / `generateContent` while keeping the same prompt contract and `normalizePaper()` pipeline.
+
+---
+
+## Quick start
 
 ### Prerequisites
 
-- Node.js 18+
-- MongoDB (local or Atlas)
-- Redis (local or Upstash)
-- Gemini API key (free at [aistudio.google.com](https://aistudio.google.com/app/apikey))
+- **Node.js** 18+
+- **MongoDB** (local via Docker or Atlas)
+- **Redis** 5+ (optional; recommended for queue + worker path)
+- **Gemini API key** — [Google AI Studio](https://aistudio.google.com/app/apikey) (optional: mock mode without a valid key)
 
-### Option A: Docker (Recommended for MongoDB + Redis)
+### 1. Infrastructure (MongoDB + Redis)
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
-### Setup Backend
+### 2. Backend
 
 ```bash
 cd backend
 cp .env.example .env
-# Edit .env and add your GEMINI_API_KEY
+# Set GEMINI_API_KEY in .env
 npm install
 npm run dev
 ```
 
-### Setup Frontend
+### 3. Worker (only when Redis is running)
+
+In a **second terminal**:
+
+```bash
+cd backend
+npm run worker
+```
+
+Without Redis, the API falls back to **inline generation** on the same process; the worker is not required.
+
+### 4. Frontend
 
 ```bash
 cd frontend
 npm install
+# Optional: frontend/.env.local
+# NEXT_PUBLIC_API_URL=http://localhost:5000
+# NEXT_PUBLIC_WS_URL=http://localhost:5000
 npm run dev
 ```
 
-Visit: http://localhost:3000
+Open **http://localhost:3000**
+
+### Verify builds
+
+```bash
+cd backend && npm run build
+cd frontend && npm run build
+```
 
 ---
 
-## ⚙️ Environment Variables
+## Environment variables
 
 ### Backend (`backend/.env`)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `PORT` | Server port | `5000` |
-| `MONGO_URI` | MongoDB connection string | `mongodb://localhost:27017/vedaai` |
-| `REDIS_URL` | Redis connection URL | `redis://localhost:6379` |
-| `GEMINI_API_KEY` | Google Gemini API key | **Required** |
-| `FRONTEND_URL` | Frontend URL for CORS | `http://localhost:3000` |
+| `PORT` | HTTP port | `5000` |
+| `MONGO_URI` | MongoDB URI | `mongodb://localhost:27017/vedaai` |
+| `REDIS_URL` | Redis URL | `redis://localhost:6379` |
+| `GEMINI_API_KEY` | Gemini API key | Required for live AI (mock if missing/invalid) |
+| `GEMINI_MODEL` | Model id | `gemini-2.0-flash` |
+| `FRONTEND_URL` | CORS / Socket origin | `http://localhost:3000` |
 
 ### Frontend (`frontend/.env.local`)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `NEXT_PUBLIC_API_URL` | Backend API URL | `http://localhost:5000` |
-| `NEXT_PUBLIC_WS_URL` | WebSocket server URL | `http://localhost:5000` |
+| `NEXT_PUBLIC_API_URL` | Backend REST base | `http://localhost:5000` |
+| `NEXT_PUBLIC_WS_URL` | Socket.IO server | `http://localhost:5000` |
 
 ---
 
-## 📁 Project Structure
+## Project structure
 
 ```
 VedaAI/
-├── frontend/                    # Next.js 14 App
+├── frontend/                 # Next.js app
 │   └── src/
-│       ├── app/
-│       │   ├── assignments/
-│       │   │   ├── page.tsx              # Dashboard
-│       │   │   ├── create/page.tsx       # Create form
-│       │   │   └── [id]/output/page.tsx  # Question paper
-│       │   ├── layout.tsx
-│       │   └── globals.css
-│       ├── components/
-│       │   ├── Sidebar.tsx
-│       │   ├── Header.tsx
-│       │   └── AssignmentCard.tsx
-│       ├── store/
-│       │   └── assignmentStore.ts        # Zustand store
-│       └── lib/
-│           └── socket.ts                 # Socket.IO client
-│
-├── backend/                     # Express + TypeScript
+│       ├── app/assignments/  # Dashboard, create, output
+│       ├── components/       # Sidebar, Header, cards
+│       ├── store/            # Zustand + API client
+│       └── lib/socket.ts     # Real-time client
+├── backend/
 │   └── src/
-│       ├── index.ts                      # App entrypoint
-│       ├── models/
-│       │   └── Assignment.ts             # Mongoose schema
-│       ├── routes/
-│       │   ├── assignments.ts            # CRUD + generation
-│       │   └── upload.ts                 # File upload
-│       ├── workers/
-│       │   └── questionWorker.ts         # BullMQ worker
-│       └── lib/
-│           ├── db.ts                     # MongoDB connection
-│           ├── redis.ts                  # Redis + BullMQ
-│           ├── socket.ts                 # Socket.IO server
-│           └── gemini.ts                 # AI generation
-│
-├── docker-compose.yml
+│       ├── index.ts          # Express + Socket.IO + Redis bridge
+│       ├── routes/           # assignments, upload
+│       ├── workers/          # BullMQ consumer
+│       └── lib/              # gemini, redis, db, socket
+├── docker-compose.yml        # MongoDB + Redis
 └── README.md
 ```
 
 ---
 
-## 🤖 AI Approach
+## Bonus features (verified)
 
-The system uses **Google Gemini 1.5 Flash** for question generation:
+| Feature | Status | Notes |
+|---------|--------|--------|
+| **PDF export** | Working | `Download as PDF` → `window.print()`; `@media print` hides chrome, sidebar, action bar |
+| **Caching / performance** | Partial | Mongoose connection reuse (`db.ts`); Redis queue with job retention; output page polls every 3s while generating |
+| **UI polish** | Working | Brand styling, stepper create flow, difficulty badges, generating state, answer key, mobile breakpoints |
+| **Regenerate** | Working | `PATCH /api/assignments/:id/regenerate` |
+| **File upload** | Working | `POST /api/upload`; text passed as `contentText` into generation (including BullMQ jobs) |
+| **WebSocket** | Working | Inline jobs emit directly; worker jobs use Redis `socket-events` bridge on API server |
 
-1. **Structured Prompt Engineering**: Input parameters (subject, class, question types, marks) are converted into a detailed prompt specifying exact output format
-2. **JSON-only Response**: The prompt instructs Gemini to return valid JSON only — no markdown, no prose
-3. **Post-processing**: Response is parsed, validated, and stored in MongoDB
-4. **Fallback Mode**: If no API key is configured, a deterministic mock generator creates sample questions
+### Manual test checklist
+
+- [ ] `docker compose up -d` → Mongo + Redis healthy
+- [ ] Backend `npm run dev` + worker `npm run worker` (if using Redis)
+- [ ] Create assignment → output shows generating → completed paper
+- [ ] **Download as PDF** → print preview shows paper only (no sidebar)
+- [ ] Upload a PDF on create → questions reference uploaded content (with valid `GEMINI_API_KEY`)
+- [ ] Delete assignment from dashboard
+- [ ] Regenerate on output page
 
 ---
 
-## 🎨 Design
+## Design
 
-Pixel-perfect implementation of the provided Figma designs:
-- VedaAI brand colors (orange `#E8521A`)
-- Clean white sidebar with smooth hover states
-- Assignment cards with context menus
-- Exam paper typography (Times New Roman)
-- Difficulty badges (Easy/Moderate/Hard with color coding)
-- Mobile-responsive layout
+- VedaAI brand accent (`#E8521A`)
+- Exam paper typography (serif body on output)
+- Difficulty badges: Easy / Moderate / Hard
+- Layout aligned to provided Figma references
 
 ---
 
-## ✨ Bonus Features Implemented
+## Tech stack
 
-- [x] PDF export (browser print dialog with print CSS)
-- [x] Regenerate button on output page
-- [x] Difficulty badges with visual color coding
-- [x] Answer key section
-- [x] Real-time WebSocket updates during generation
-- [x] Fallback inline processing when Redis unavailable
-- [x] File upload with PDF text extraction
+| Layer | Stack |
+|-------|--------|
+| Frontend | Next.js 16, React 19, TypeScript, Zustand, Socket.IO client |
+| Backend | Express, TypeScript, Mongoose, BullMQ, Socket.IO |
+| AI | Google Generative AI SDK (Gemini) |
+| Data | MongoDB, Redis |
+
+---
+
+## License
+
+MIT (or your chosen license for submission).

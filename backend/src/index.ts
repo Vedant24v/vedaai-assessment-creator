@@ -72,6 +72,7 @@ if (!process.env.VERCEL) {
       try {
         const { initSocket } = await import('./lib/socket');
         initSocket(httpServer);
+        await initSocketRedisBridge();
       } catch {
         console.warn('Socket.IO init failed');
       }
@@ -86,6 +87,36 @@ if (!process.env.VERCEL) {
   }
 
   start();
+}
+
+/** Forward worker pub/sub events to Socket.IO rooms (BullMQ worker process). */
+async function initSocketRedisBridge() {
+  try {
+    const { getRedis } = await import('./lib/redis');
+    const redis = getRedis();
+    if (!redis) return;
+
+    const subscriber = redis.duplicate();
+    await subscriber.subscribe('socket-events');
+    subscriber.on('message', (_channel, message) => {
+      try {
+        const payload = JSON.parse(message) as {
+          event: string;
+          room: string;
+          data: unknown;
+        };
+        const assignmentId = payload.room.replace(/^assignment:/, '');
+        void import('./lib/socket').then(({ emitToAssignment }) => {
+          emitToAssignment(assignmentId, payload.event, payload.data);
+        });
+      } catch {
+        // Ignore malformed bridge messages.
+      }
+    });
+    console.log('Socket.IO Redis bridge listening');
+  } catch {
+    console.warn('Socket.IO Redis bridge not available');
+  }
 }
 
 export default app;
