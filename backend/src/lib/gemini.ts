@@ -219,26 +219,18 @@ export async function generateQuestionPaper(input: GenerationInput): Promise<Gen
     const parsed = JSON.parse(extractJson(response)) as GeneratedPaper;
     return normalizePaper(parsed, input);
   } catch (err) {
-    if (isExpectedFallbackError(err)) {
+    if (isMissingApiKeyError(err)) {
+      console.warn('No valid GEMINI_API_KEY — using mock generator');
       return generateMockPaper(input);
     }
 
-    console.warn('Gemini generation failed, using mock generator:', err);
-    return generateMockPaper(input);
+    throw err instanceof Error ? err : new Error(String(err));
   }
 }
 
-function isExpectedFallbackError(err: unknown) {
+function isMissingApiKeyError(err: unknown) {
   const message = err instanceof Error ? err.message : String(err);
-  return (
-    message.includes('GEMINI_API_KEY') ||
-    message.includes('API key') ||
-    message.includes('429') ||
-    message.includes('Quota') ||
-    message.includes('quota') ||
-    message.includes('503') ||
-    message.includes('Service Unavailable')
-  );
+  return message.includes('GEMINI_API_KEY') || message.includes('API key not valid');
 }
 
 export function generateMockPaper(input: GenerationInput): GeneratedPaper {
