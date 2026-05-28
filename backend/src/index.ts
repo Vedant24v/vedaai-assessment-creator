@@ -11,7 +11,9 @@ const httpServer = createServer(app);
 
 // Middleware
 app.use(cors({
-  origin: process.env.FRONTEND_URL || '*',
+  origin: (origin, callback) => {
+    callback(null, origin || '*');
+  },
   credentials: true,
 }));
 app.use(express.json({ limit: '10mb' }));
