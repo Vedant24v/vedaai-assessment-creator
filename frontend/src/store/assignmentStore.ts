@@ -127,8 +127,15 @@ export const useAssignmentStore = create<AssignmentStore>()(
         set({ isCreating: true, error: null });
         try {
           const res = await api.post('/api/assignments', data);
-          set({ isCreating: false });
-          return res.data.data._id;
+          const created = res.data.data as Assignment;
+          set((state) => ({
+            isCreating: false,
+            currentAssignment: created,
+            assignments: state.assignments.some((assignment) => assignment._id === created._id)
+              ? state.assignments
+              : [created, ...state.assignments],
+          }));
+          return created._id;
         } catch (err) {
           const message = axios.isAxiosError(err)
             ? err.response?.data?.error || err.message

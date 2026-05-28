@@ -24,7 +24,18 @@ app.use(
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
+function hasUsableMongoUri() {
+  const uri = process.env.MONGODB_URI || process.env.MONGO_URI;
+  if (!process.env.VERCEL) return true;
+  return !!uri && !uri.includes('localhost') && !uri.includes('127.0.0.1');
+}
+
 app.use(async (_req, _res, next) => {
+  if (!hasUsableMongoUri()) {
+    next();
+    return;
+  }
+
   try {
     await connectDB();
     next();

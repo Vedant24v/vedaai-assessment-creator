@@ -1,8 +1,47 @@
 import { Router, Request, Response } from 'express';
+import { randomUUID } from 'crypto';
 import { Assignment } from '../models/Assignment';
-import { GenerationInput, generateQuestionPaper } from '../lib/gemini';
+import { GeneratedPaper, GenerationInput, generateQuestionPaper } from '../lib/gemini';
 
 const router = Router();
+
+type MemoryAssignment = {
+  _id: string;
+  id: string;
+  title: string;
+  subject: string;
+  className: string;
+  dueDate: string;
+  totalMarks: number;
+  duration: number;
+  questionTypes: GenerationInput['questionTypes'];
+  additionalInstructions?: string;
+  uploadedFileName?: string;
+  jobStatus: 'pending' | 'processing' | 'completed' | 'failed';
+  jobError?: string;
+  generatedPaper?: GeneratedPaper;
+  createdAt: string;
+  updatedAt: string;
+  totalQuestions: number;
+};
+
+const globalWithMemory = globalThis as typeof globalThis & {
+  vedaMemoryAssignments?: Map<string, MemoryAssignment>;
+};
+
+const memoryAssignments = globalWithMemory.vedaMemoryAssignments || new Map<string, MemoryAssignment>();
+globalWithMemory.vedaMemoryAssignments = memoryAssignments;
+
+function useMemoryStore() {
+  const uri = process.env.MONGODB_URI || process.env.MONGO_URI;
+  return !!process.env.VERCEL && (!uri || uri.includes('localhost') || uri.includes('127.0.0.1'));
+}
+
+function publicMemoryAssignment(assignment: MemoryAssignment, includePaper = true) {
+  if (includePaper) return assignment;
+  const { generatedPaper: _generatedPaper, ...summary } = assignment;
+  return summary;
+}
 
 async function tryEmit(assignmentId: string, event: string, data: unknown) {
   if (process.env.VERCEL) return;
@@ -72,6 +111,13 @@ function buildGenerationInput(body: {
 }
 
 router.get('/', async (_req: Request, res: Response) => {
+  if (useMemoryStore()) {
+    const assignments = Array.from(memoryAssignments.values())
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .map((assignment) => publicMemoryAssignment(assignment, false));
+    return res.json({ success: true, data: assignments });
+  }
+
   try {
     const assignments = await Assignment.find()
       .select('-generatedPaper')
@@ -85,6 +131,14 @@ router.get('/', async (_req: Request, res: Response) => {
 });
 
 router.get('/:id', async (req: Request, res: Response) => {
+  if (useMemoryStore()) {
+    const assignment = memoryAssignments.get(req.params.id);
+    if (!assignment) {
+      return res.status(404).json({ success: false, error: 'Assignment not found' });
+    }
+    return res.json({ success: true, data: assignment });
+  }
+
   try {
     const assignment = await Assignment.findById(req.params.id);
     if (!assignment) {
@@ -133,6 +187,33 @@ router.post('/', async (req: Request, res: Response) => {
       additionalInstructions,
       contentText,
     });
+
+    if (useMemoryStore()) {
+      const now = new Date().toISOString();
+      const paper = await generateQuestionPaper(input);
+      const id = randomUUID();
+      const assignment: MemoryAssignment = {
+        _id: id,
+        id,
+        title: title.trim(),
+        subject: input.subject,
+        className: input.className,
+        dueDate: new Date(dueDate).toISOString(),
+        totalMarks: input.totalMarks,
+        duration: input.duration,
+        questionTypes: input.questionTypes,
+        additionalInstructions: input.additionalInstructions,
+        uploadedFileName,
+        jobStatus: 'completed',
+        generatedPaper: paper,
+        createdAt: now,
+        updatedAt: now,
+        totalQuestions: input.questionTypes.reduce((sum, qt) => sum + qt.count, 0),
+      };
+
+      memoryAssignments.set(id, assignment);
+      return res.status(201).json({ success: true, data: assignment });
+    }
 
     const assignment = await Assignment.create({
       title: title.trim(),
@@ -190,6 +271,14 @@ router.post('/', async (req: Request, res: Response) => {
 });
 
 router.delete('/:id', async (req: Request, res: Response) => {
+  if (useMemoryStore()) {
+    const deleted = memoryAssignments.delete(req.params.id);
+    if (!deleted) {
+      return res.status(404).json({ success: false, error: 'Assignment not found' });
+    }
+    return res.json({ success: true, message: 'Assignment deleted' });
+  }
+
   try {
     const assignment = await Assignment.findByIdAndDelete(req.params.id);
     if (!assignment) {
@@ -204,6 +293,30 @@ router.delete('/:id', async (req: Request, res: Response) => {
 });
 
 router.patch('/:id/regenerate', async (req: Request, res: Response) => {
+  if (useMemoryStore()) {
+    const assignment = memoryAssignments.get(req.params.id);
+    if (!assignment) {
+      return res.status(404).json({ success: false, error: 'Assignment not found' });
+    }
+
+    const input: GenerationInput = {
+      subject: assignment.subject,
+      className: assignment.className,
+      totalMarks: assignment.totalMarks,
+      duration: assignment.duration,
+      questionTypes: assignment.questionTypes,
+      additionalInstructions: assignment.additionalInstructions,
+    };
+
+    const paper = await generateQuestionPaper(input);
+    assignment.generatedPaper = paper;
+    assignment.jobStatus = 'completed';
+    assignment.jobError = undefined;
+    assignment.updatedAt = new Date().toISOString();
+    memoryAssignments.set(assignment._id, assignment);
+    return res.json({ success: true, data: assignment, paper });
+  }
+
   try {
     const assignment = await Assignment.findById(req.params.id);
     if (!assignment) {
