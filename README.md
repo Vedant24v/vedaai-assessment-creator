@@ -2,7 +2,7 @@
 
 > Full-stack AI-powered assessment generation system for teachers. Built for structured prompt engineering, JSON parsing, and production-style async job handling.
 
-**Submission:** [Google Form](https://docs.google.com/forms/d/e/1FAIpQLSeL19GVvVT8vZrTx67hMWKTXLyJSyhkW5XGyzh7Ppt5w8P1jw/viewform?usp=dialog)
+
 
 ---
 
@@ -215,6 +215,3 @@ VedaAI/
 
 ---
 
-## License
-
-MIT (or your chosen license for submission).
